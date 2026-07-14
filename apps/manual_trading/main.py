@@ -1,0 +1,174 @@
+"""Entry point for the manual trading bot.
+
+Usage:
+    python -m apps.manual_trading.main
+
+This starts the Telegram bot with the shared demo broker connection
+for market data. No per-user SSID is needed for manual trading mode.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal as signal_module
+import sys
+from pathlib import Path
+
+import structlog
+
+# Add project root to path for imports
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.settings import load_settings
+from infrastructure.persistence.database import init_db
+from infrastructure.broker.pocket_option import PocketOptionBroker
+from apps.manual_trading.bot import ManualTradingBot
+from apps.manual_trading.database import PredictionStore
+from apps.manual_trading.market_data import MarketDataCollector
+from apps.manual_trading.trade_tracker import TradeTracker
+
+logger = structlog.get_logger()
+
+RECONNECT_BASE_DELAY = 5
+RECONNECT_MAX_DELAY = 120
+
+
+async def broker_reconnect_loop(broker: PocketOptionBroker) -> None:
+    """Continuously try to reconnect the broker if disconnected."""
+    delay = RECONNECT_BASE_DELAY
+    while True:
+        try:
+            if not await broker.is_connected():
+                logger.info("broker_reconnect_attempt", delay=delay)
+                try:
+                    await broker.connect()
+                    delay = RECONNECT_BASE_DELAY
+                    logger.info("broker_reconnected")
+                except Exception as e:
+                    logger.error("broker_reconnect_failed", error=str(e))
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, RECONNECT_MAX_DELAY)
+            else:
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("reconnect_loop_error")
+            await asyncio.sleep(delay)
+
+
+async def main() -> None:
+    """Start the manual trading bot."""
+    settings = load_settings()
+    logger.info("starting_manual_trading_bot")
+
+    # Initialize database (with retry)
+    engine = None
+    session_factory = None
+    for attempt in range(1, 6):
+        try:
+            engine, session_factory = await init_db(settings.postgres)
+            logger.info("db_connected", attempt=attempt)
+            break
+        except Exception as e:
+            logger.warning("db_connect_failed", attempt=attempt, error=str(e))
+            if attempt < 5:
+                await asyncio.sleep(10)
+
+    if session_factory is None:
+        logger.error("db_unavailable_cannot_start")
+        return
+
+    # Initialize components
+    prediction_store = PredictionStore(session_factory)
+    market_data = MarketDataCollector()
+    broker = PocketOptionBroker(config=settings.broker)
+
+    # Register market data collector as a message handler
+    broker.on_message(market_data.make_message_handler())
+
+    # Trade tracker — resolves predictions when they expire
+    trade_tracker = TradeTracker(
+        prediction_store=prediction_store,
+        get_price_fn=market_data.get_latest_price,
+        notify_fn=lambda tid, msg: _send_telegram_message(
+            settings.telegram.bot_token.get_secret_value(),
+            tid,
+            msg,
+        ),
+    )
+
+    # Connect broker
+    logger.info("connecting_broker")
+    try:
+        await broker.connect()
+        logger.info("broker_connected")
+    except Exception as e:
+        logger.error("broker_connection_failed", error=str(e))
+        logger.info("will_retry_in_background")
+
+    # Build Telegram bot
+    bot = ManualTradingBot(
+        bot_token=settings.telegram.bot_token.get_secret_value(),
+    )
+    app = bot.build(
+        broker=broker,
+        prediction_store=prediction_store,
+        market_data=market_data,
+    )
+
+    # Start the Telegram bot
+    logger.info("starting_telegram_bot")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await bot.set_commands()
+
+    # Start background tasks
+    trade_tracker.start()
+    reconnect_task = asyncio.create_task(broker_reconnect_loop(broker))
+
+    logger.info("manual_trading_bot_started")
+
+    # Wait for shutdown
+    stop_event = asyncio.Event()
+
+    def signal_handler():
+        logger.info("shutdown_signal_received")
+        stop_event.set()
+
+    loop = asyncio.get_event_loop()
+    for sig in (signal_module.SIGINT, signal_module.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            pass
+
+    await stop_event.wait()
+
+    # Graceful shutdown
+    logger.info("shutting_down")
+    trade_tracker.stop()
+    reconnect_task.cancel()
+    await asyncio.gather(reconnect_task, return_exceptions=True)
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+    await broker.disconnect()
+    if engine is not None:
+        await engine.dispose()
+    logger.info("manual_trading_bot_stopped")
+
+
+async def _send_telegram_message(bot_token: str, chat_id: int, text: str) -> None:
+    """Send a Telegram message directly (for trade tracker notifications)."""
+    from telegram import Bot
+
+    bot = Bot(token=bot_token)
+    await bot.send_message(chat_id=chat_id, text=text)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
