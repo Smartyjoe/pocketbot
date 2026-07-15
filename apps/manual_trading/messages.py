@@ -7,10 +7,15 @@ from apps.manual_trading.models import Signal, Prediction, DURATION_OPTIONS
 def format_signal(symbol: str, signal: Signal, entry_price: float) -> str:
     """Format a signal into a clean Telegram message."""
     direction_label = "CALL (Up)" if signal.direction == "call" else "PUT (Down)"
-    direction_emoji = "CALL" if signal.direction == "call" else "PUT"
+    if signal.direction == "call":
+        dir_icon = "\U0001f7e2"
+        direction_emoji = "CALL"
+    else:
+        dir_icon = "\U0001f534"
+        direction_emoji = "PUT"
 
     lines = [
-        f"{direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
+        f"{dir_icon} {direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
         f"",
         f"Direction: {direction_label}",
         f"Confidence: {signal.confidence:.0%}",
@@ -32,7 +37,7 @@ def format_prediction_confirmed(prediction: Prediction) -> str:
     duration_label = _duration_label(prediction.timeframe_sec)
 
     return (
-        f"Prediction Recorded\n\n"
+        f"\u23f0 Prediction Recorded\n\n"
         f"{direction_emoji} {symbol_display}\n"
         f"Entry: {float(prediction.entry_price):.5f}\n"
         f"Duration: {duration_label}\n"
@@ -51,11 +56,11 @@ def format_prediction_expired(
     direction_emoji = "CALL" if prediction.direction == "call" else "PUT"
 
     if result == "win":
-        status = "WIN"
+        status = "\U0001f3c6 WIN"
     elif result == "loss":
-        status = "LOSS"
+        status = "\U0001f4c9 LOSS"
     else:
-        status = "TIE"
+        status = "\U0001f504 TIE"
 
     return (
         f"Prediction Result\n\n"
@@ -74,7 +79,7 @@ def format_stats(stats: dict) -> str:
     win_rate = stats["win_rate"]
 
     lines = [
-        "Trading Stats",
+        "\U0001f4ca Trading Stats",
         "",
         f"Total Predictions: {total}",
         f"Wins: {wins} | Losses: {losses}",
@@ -104,7 +109,7 @@ def format_recent(predictions: list[dict]) -> str:
     if not predictions:
         return "No recent predictions."
 
-    lines = ["Recent Predictions", ""]
+    lines = ["\U0001f4cb Recent Predictions", ""]
     for p in predictions:
         sym = p["symbol"].replace("_otc", " (OTC)").replace("_", "/")
         d = "CALL" if p["direction"] == "call" else "PUT"

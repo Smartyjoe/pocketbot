@@ -44,7 +44,21 @@ CANDLE_TIMEFRAMES: dict[str, int] = {
     "15m": 900,
 }
 
-# How many historical candles to fetch for indicator computation.
+# Base number of candles to fetch for indicator computation.
 # MACD(12,26,9) needs ~26 candles for stable slow EMA; with fewer,
 # indicators degrade gracefully (NaN → skipped in signal scoring).
 CANDLES_NEEDED = 30
+
+# Minimum candles required per timeframe for signal generation.
+# Higher timeframes have fewer candles available from the server,
+# so we relax the requirement proportionally.
+MIN_CANDLES_BY_TIMEFRAME: dict[int, int] = {
+    60: 16,   # 1m — server returns plenty
+    300: 10,  # 5m — server returns ~10-15 with scaled offset
+    900: 8,   # 15m — server returns very few; indicators degrade gracefully
+}
+
+
+def min_candles_for_timeframe(timeframe_sec: int) -> int:
+    """Return the minimum candles needed for a given timeframe."""
+    return MIN_CANDLES_BY_TIMEFRAME.get(timeframe_sec, 10)

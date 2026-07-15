@@ -21,8 +21,8 @@ _SIGNAL_IMAGES = {
 from apps.manual_trading.constants import (
     POPULAR_PAIRS,
     CANDLES_NEEDED,
+    min_candles_for_timeframe,
 )
-from apps.manual_trading.signal_generator import MIN_CANDLES
 from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.keyboards import (
     pair_selection_keyboard,
@@ -49,7 +49,7 @@ CANDLE_POLL_INTERVAL = 0.5
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     await update.message.reply_text(
-        "Manual Trading Bot\n\n"
+        "\U0001f916 Manual Trading Bot\n\n"
         "Get AI-powered predictions for Pocket Option pairs.\n"
         "No account connection needed.\n\n"
         "Commands:\n"
@@ -143,7 +143,7 @@ async def callback_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     telegram_id = update.effective_user.id
 
     # Show loading message
-    await query.edit_message_text("Analyzing market conditions...")
+    await query.edit_message_text("\u23f3 Analyzing market conditions...")
 
     try:
         broker = context.bot_data["broker"]
@@ -162,18 +162,22 @@ async def callback_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await collector.request_candles(broker, symbol, timeframe_sec)
 
         # Wait for candle data to arrive
-        df = await _wait_for_candles(collector, symbol, CANDLE_WAIT_TIMEOUT)
+        df = await _wait_for_candles(collector, symbol, timeframe_sec, CANDLE_WAIT_TIMEOUT)
 
-        if df is None or len(df) < MIN_CANDLES:
+        min_candles = min_candles_for_timeframe(timeframe_sec)
+        if df is None or len(df) < min_candles:
             logger.warning(
-                "insufficient_candle_data symbol=%s count=%d known=%s",
+                "insufficient_candle_data symbol=%s count=%d needed=%d timeframe=%d known=%s",
                 symbol,
                 len(df) if df is not None else 0,
+                min_candles,
+                timeframe_sec,
                 list(collector.get_all_prices().keys())[:5],
             )
             await query.edit_message_text(
-                "Insufficient market data. The pair may not be available right now.\n"
-                "Try again in a moment or pick a different pair."
+                f"Insufficient market data ({len(df) if df is not None else 0}/{min_candles} candles).\n"
+                f"The pair may not be available right now.\n"
+                f"Try again in a moment or pick a different pair."
             )
             return
 
@@ -248,14 +252,16 @@ async def callback_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def _wait_for_candles(
     collector: MarketDataCollector,
     symbol: str,
+    timeframe_sec: int,
     timeout: float,
 ) -> pd.DataFrame | None:
     """Wait for candle data to arrive, polling periodically."""
+    min_needed = min_candles_for_timeframe(timeframe_sec)
     deadline = asyncio.get_event_loop().time() + timeout
     attempts = 0
     while asyncio.get_event_loop().time() < deadline:
         df = await collector.get_candles(symbol)
-        if df is not None and len(df) >= MIN_CANDLES:
+        if df is not None and len(df) >= min_needed:
             logger.info(
                 "candles_ready symbol=%s count=%d attempts=%d",
                 symbol, len(df), attempts,

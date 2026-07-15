@@ -787,12 +787,18 @@ class PocketOptionBroker:
             now = self._server_time or int(_time.time())
 
             # loadHistoryPeriod — historical candle backfill
+            # Scale offset proportionally to timeframe so we always get
+            # enough candles regardless of the interval.
+            # For 60s candles: offset=1000 → ~16 candles
+            # For 300s candles: offset=15000 → ~50 candles
+            # For 900s candles: offset=45000 → ~50 candles
+            scaled_offset = max(1000, timeframe_seconds * 50)
             history_payload = {
                 "asset": asset,
                 "period": timeframe_seconds,
                 "time": now,
                 "index": _random_index(),
-                "offset": 1000,
+                "offset": scaled_offset,
             }
             msg_hist = f'42["loadHistoryPeriod",{json.dumps(history_payload)}]'
             await self._ws.send(msg_hist)
