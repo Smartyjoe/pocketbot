@@ -46,6 +46,35 @@ def format_prediction_confirmed(prediction: Prediction) -> str:
     )
 
 
+def format_result_request(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    timeframe_sec: int,
+) -> str:
+    """Format the message asking the user to confirm trade outcome."""
+    symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
+    direction_label = "CALL" if direction == "call" else "PUT"
+
+    return (
+        f"\u23f0 Trade Expired\n\n"
+        f"{direction_label} {symbol_display}\n"
+        f"Entry: {entry_price:.5f}\n"
+        f"Duration: {_duration_label(timeframe_sec)}\n\n"
+        f"What was the result?"
+    )
+
+
+def format_result_recorded(result: str) -> str:
+    """Format confirmation after the user submits a result."""
+    if result == "win":
+        return "\u2705 Result recorded: WIN"
+    elif result == "loss":
+        return "\u274c Result recorded: LOSS"
+    else:
+        return "\U0001f504 Result recorded: TIE"
+
+
 def format_prediction_expired(
     prediction: Prediction,
     result: str,

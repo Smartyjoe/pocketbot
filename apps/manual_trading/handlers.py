@@ -27,11 +27,13 @@ from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.keyboards import (
     pair_selection_keyboard,
     duration_selection_keyboard,
+    result_feedback_keyboard,
 )
 from apps.manual_trading.market_data import MarketDataCollector
 from apps.manual_trading.messages import (
     format_signal,
     format_prediction_confirmed,
+    format_result_recorded,
     format_stats,
     format_recent,
 )
@@ -46,8 +48,21 @@ CANDLE_WAIT_TIMEOUT = 15
 CANDLE_POLL_INTERVAL = 0.5
 
 
+async def _has_pending_result(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> bool:
+    """Return True if the user has an unresolved trade result waiting."""
+    pending: set[int] = context.bot_data.get("pending_results", set())
+    return telegram_id in pending
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
+    if await _has_pending_result(context, update.effective_user.id):
+        await update.message.reply_text(
+            "\u26a0\ufe0f Please report the result of your last trade first.\n"
+            "Tap Win, Tie, or Loss below that message before continuing."
+        )
+        return
+
     await update.message.reply_text(
         "\U0001f916 Manual Trading Bot\n\n"
         "Get AI-powered predictions for Pocket Option pairs.\n"
@@ -62,12 +77,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
+    if await _has_pending_result(context, update.effective_user.id):
+        await update.message.reply_text(
+            "\u26a0\ufe0f Please report the result of your last trade first.\n"
+            "Tap Win, Tie, or Loss below that message before continuing."
+        )
+        return
+
     await update.message.reply_text(
         "How it works:\n\n"
         "1. /predict - Choose a pair\n"
         "2. Pick a duration (1min, 5min, or 15min)\n"
         "3. Get a signal with direction and reasoning\n"
-        "4. Bot tracks the outcome automatically\n\n"
+        "4. When the trade expires, report the result (Win/Tie/Loss)\n\n"
         "Commands:\n"
         "/predict - Get a prediction\n"
         "/stats - Your trading stats\n"
@@ -78,6 +100,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /predict command — show pair selection keyboard."""
+    if await _has_pending_result(context, update.effective_user.id):
+        await update.message.reply_text(
+            "\u26a0\ufe0f Please report the result of your last trade first.\n"
+            "Tap Win, Tie, or Loss below that message before continuing."
+        )
+        return
+
     await update.message.reply_text(
         "Choose a trading pair:",
         reply_markup=pair_selection_keyboard(),
@@ -86,6 +115,13 @@ async def cmd_predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /stats command — show win rate and performance."""
+    if await _has_pending_result(context, update.effective_user.id):
+        await update.message.reply_text(
+            "\u26a0\ufe0f Please report the result of your last trade first.\n"
+            "Tap Win, Tie, or Loss below that message before continuing."
+        )
+        return
+
     store: PredictionStore = context.bot_data["prediction_store"]
     telegram_id = update.effective_user.id
 
@@ -99,6 +135,13 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /recent command — show recent predictions."""
+    if await _has_pending_result(context, update.effective_user.id):
+        await update.message.reply_text(
+            "\u26a0\ufe0f Please report the result of your last trade first.\n"
+            "Tap Win, Tie, or Loss below that message before continuing."
+        )
+        return
+
     store: PredictionStore = context.bot_data["prediction_store"]
     telegram_id = update.effective_user.id
 
@@ -280,3 +323,55 @@ async def _wait_for_candles(
         list(collector.get_all_prices().keys())[:10],
     )
     return df
+
+
+async def callback_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Win / Tie / Loss button press after trade expiry."""
+    query: CallbackQuery = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if not data.startswith("result:"):
+        return
+
+    parts = data.split(":")
+    if len(parts) != 3:
+        return
+
+    prediction_id = parts[1]
+    result = parts[2]
+
+    if result not in ("win", "tie", "loss"):
+        return
+
+    telegram_id = update.effective_user.id
+    pending: set[int] = context.bot_data.get("pending_results", set())
+
+    store: PredictionStore = context.bot_data["prediction_store"]
+
+    try:
+        from uuid import UUID
+
+        await store.resolve(
+            prediction_id=UUID(prediction_id),
+            exit_price=Decimal("0"),
+            result=result,
+        )
+
+        # Remove from pending set
+        pending.discard(telegram_id)
+
+        # Confirm to user
+        await query.edit_message_text(text=format_result_recorded(result))
+
+        logger.info(
+            "result_submitted prediction_id=%s result=%s telegram_id=%s",
+            prediction_id,
+            result,
+            telegram_id,
+        )
+    except Exception:
+        logger.exception("result_callback_error")
+        await query.edit_message_text(
+            "Error recording result. Please try again."
+        )

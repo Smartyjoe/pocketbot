@@ -89,14 +89,16 @@ async def main() -> None:
     # Register market data collector as a message handler
     broker.on_message(market_data.make_message_handler())
 
-    # Trade tracker — resolves predictions when they expire
+    # Shared set of telegram_ids waiting for a trade-result reply
+    pending_results: set[int] = set()
+
+    # Trade tracker — sends Win/Tie/Loss buttons when predictions expire
     trade_tracker = TradeTracker(
         prediction_store=prediction_store,
         get_price_fn=market_data.get_latest_price,
-        notify_fn=lambda tid, msg: _send_telegram_message(
+        send_message_fn=_make_send_message_fn(
             settings.telegram.bot_token.get_secret_value(),
-            tid,
-            msg,
+            pending_results,
         ),
     )
 
@@ -117,6 +119,7 @@ async def main() -> None:
         broker=broker,
         prediction_store=prediction_store,
         market_data=market_data,
+        pending_results=pending_results,
     )
 
     # Start the Telegram bot
@@ -162,12 +165,33 @@ async def main() -> None:
     logger.info("manual_trading_bot_stopped")
 
 
-async def _send_telegram_message(bot_token: str, chat_id: int, text: str) -> None:
-    """Send a Telegram message directly (for trade tracker notifications)."""
-    from telegram import Bot
+def _make_send_message_fn(bot_token: str, pending_results: set[int]):
+    """Return an async function that sends Telegram messages with keyboards.
 
-    bot = Bot(token=bot_token)
-    await bot.send_message(chat_id=chat_id, text=text)
+    When a message is sent with a Win/Tie/Loss keyboard, the target user
+    is added to *pending_results* so that command handlers can block them
+    until they tap a button.
+    """
+
+    async def _send(
+        chat_id: int,
+        text: str,
+        reply_markup=None,
+    ) -> None:
+        from telegram import Bot
+
+        bot = Bot(token=bot_token)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+        # If the message carries a result-feedback keyboard, the user
+        # must reply before doing anything else.
+        if reply_markup is not None:
+            pending_results.add(chat_id)
+
+    return _send
 
 
 if __name__ == "__main__":

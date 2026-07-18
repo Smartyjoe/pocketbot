@@ -34,3 +34,24 @@ def duration_selection_keyboard(symbol: str) -> InlineKeyboardMarkup:
         for opt in DURATION_OPTIONS
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def result_feedback_keyboard(prediction_id: str) -> InlineKeyboardMarkup:
+    """Show Win / Tie / Loss buttons for a completed trade."""
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="\U0001f3c6 Win",
+                callback_data=f"result:{prediction_id}:win",
+            ),
+            InlineKeyboardButton(
+                text="\U0001f504 Tie",
+                callback_data=f"result:{prediction_id}:tie",
+            ),
+            InlineKeyboardButton(
+                text="\U0001f4c9 Loss",
+                callback_data=f"result:{prediction_id}:loss",
+            ),
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
