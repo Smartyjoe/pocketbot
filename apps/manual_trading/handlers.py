@@ -49,9 +49,15 @@ CANDLE_POLL_INTERVAL = 0.5
 
 
 async def _has_pending_result(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> bool:
-    """Return True if the user has an unresolved trade result waiting."""
-    pending: set[int] = context.bot_data.get("pending_results", set())
-    return telegram_id in pending
+    """Return True if the user has an unresolved trade result waiting.
+
+    Checks the database for predictions where we sent a result-request
+    but the user hasn't responded yet.
+    """
+    store: PredictionStore = context.bot_data.get("prediction_store")
+    if store is None:
+        return False
+    return await store.has_pending_result(telegram_id)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -345,7 +351,6 @@ async def callback_result(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     telegram_id = update.effective_user.id
-    pending: set[int] = context.bot_data.get("pending_results", set())
 
     store: PredictionStore = context.bot_data["prediction_store"]
 
@@ -357,9 +362,6 @@ async def callback_result(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             exit_price=Decimal("0"),
             result=result,
         )
-
-        # Remove from pending set
-        pending.discard(telegram_id)
 
         # Confirm to user
         await query.edit_message_text(text=format_result_recorded(result))

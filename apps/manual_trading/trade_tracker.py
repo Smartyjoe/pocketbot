@@ -101,6 +101,9 @@ class TradeTracker:
                     msg_text,
                     reply_markup=keyboard,
                 )
+                # Mark as requested so we don't ask again
+                from uuid import UUID
+                await self._store.mark_result_requested(UUID(prediction_id))
                 logger.info(
                     "result_request_sent prediction_id=%s symbol=%s telegram_id=%s",
                     prediction_id,

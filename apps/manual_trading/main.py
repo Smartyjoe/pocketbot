@@ -21,6 +21,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from sqlalchemy import text
+
 from config.settings import load_settings
 from infrastructure.persistence.database import init_db
 from infrastructure.broker.pocket_option import PocketOptionBroker
@@ -81,6 +83,18 @@ async def main() -> None:
         logger.error("db_unavailable_cannot_start")
         return
 
+    # Ensure result_requested_at column exists (idempotent migration)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text(
+                "ALTER TABLE predictions "
+                "ADD COLUMN IF NOT EXISTS result_requested_at TIMESTAMPTZ"
+            ))
+            await conn.commit()
+        logger.info("migration_result_requested_at_applied")
+    except Exception:
+        logger.warning("migration_result_requested_at_failed", exc_info=True)
+
     # Initialize components
     prediction_store = PredictionStore(session_factory)
     market_data = MarketDataCollector()
@@ -89,16 +103,12 @@ async def main() -> None:
     # Register market data collector as a message handler
     broker.on_message(market_data.make_message_handler())
 
-    # Shared set of telegram_ids waiting for a trade-result reply
-    pending_results: set[int] = set()
-
     # Trade tracker — sends Win/Tie/Loss buttons when predictions expire
     trade_tracker = TradeTracker(
         prediction_store=prediction_store,
         get_price_fn=market_data.get_latest_price,
         send_message_fn=_make_send_message_fn(
             settings.telegram.bot_token.get_secret_value(),
-            pending_results,
         ),
     )
 
@@ -119,7 +129,6 @@ async def main() -> None:
         broker=broker,
         prediction_store=prediction_store,
         market_data=market_data,
-        pending_results=pending_results,
     )
 
     # Start the Telegram bot
@@ -165,13 +174,8 @@ async def main() -> None:
     logger.info("manual_trading_bot_stopped")
 
 
-def _make_send_message_fn(bot_token: str, pending_results: set[int]):
-    """Return an async function that sends Telegram messages with keyboards.
-
-    When a message is sent with a Win/Tie/Loss keyboard, the target user
-    is added to *pending_results* so that command handlers can block them
-    until they tap a button.
-    """
+def _make_send_message_fn(bot_token: str):
+    """Return an async function that sends Telegram messages with keyboards."""
 
     async def _send(
         chat_id: int,
@@ -186,10 +190,6 @@ def _make_send_message_fn(bot_token: str, pending_results: set[int]):
             text=text,
             reply_markup=reply_markup,
         )
-        # If the message carries a result-feedback keyboard, the user
-        # must reply before doing anything else.
-        if reply_markup is not None:
-            pending_results.add(chat_id)
 
     return _send
 

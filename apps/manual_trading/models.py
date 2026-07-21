@@ -32,6 +32,7 @@ class Prediction(BaseModel):
     expiry_time: datetime
     exit_price: Decimal | None = None
     result: str | None = None
+    result_requested_at: datetime | None = None
     created_at: datetime | None = None
 
 
