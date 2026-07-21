@@ -19,28 +19,24 @@ _SIGNAL_IMAGES = {
 }
 
 from apps.manual_trading.constants import (
+    POPULAR_PAIRS,
+    CANDLES_NEEDED,
     min_candles_for_timeframe,
 )
 from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.keyboards import (
     pair_selection_keyboard,
     duration_selection_keyboard,
-    trade_mode_keyboard,
 )
 from apps.manual_trading.market_data import MarketDataCollector
 from apps.manual_trading.messages import (
     format_signal,
     format_prediction_confirmed,
-    format_result_recorded,
     format_stats,
     format_recent,
-    format_ai_signal,
-    format_no_model_available,
-    format_no_signal,
 )
 from apps.manual_trading.models import Prediction
 from apps.manual_trading.signal_generator import generate_signal
-from apps.manual_trading.constants import COOLDOWN_BARS
 from infrastructure.features.indicators.technical import TechnicalIndicators
 
 logger = logging.getLogger(__name__)
@@ -50,27 +46,8 @@ CANDLE_WAIT_TIMEOUT = 15
 CANDLE_POLL_INTERVAL = 0.5
 
 
-async def _has_pending_result(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> bool:
-    """Return True if the user has an unresolved trade result waiting.
-
-    Checks the database for predictions where we sent a result-request
-    but the user hasn't responded yet.
-    """
-    store: PredictionStore = context.bot_data.get("prediction_store")
-    if store is None:
-        return False
-    return await store.has_pending_result(telegram_id)
-
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
-    if await _has_pending_result(context, update.effective_user.id):
-        await update.message.reply_text(
-            "\u26a0\ufe0f Please report the result of your last trade first.\n"
-            "Tap Win, Tie, or Loss below that message before continuing."
-        )
-        return
-
     await update.message.reply_text(
         "\U0001f916 Manual Trading Bot\n\n"
         "Get AI-powered predictions for Pocket Option pairs.\n"
@@ -85,19 +62,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
-    if await _has_pending_result(context, update.effective_user.id):
-        await update.message.reply_text(
-            "\u26a0\ufe0f Please report the result of your last trade first.\n"
-            "Tap Win, Tie, or Loss below that message before continuing."
-        )
-        return
-
     await update.message.reply_text(
         "How it works:\n\n"
         "1. /predict - Choose a pair\n"
         "2. Pick a duration (1min, 5min, or 15min)\n"
         "3. Get a signal with direction and reasoning\n"
-        "4. When the trade expires, report the result (Win/Tie/Loss)\n\n"
+        "4. Bot tracks the outcome automatically\n\n"
         "Commands:\n"
         "/predict - Get a prediction\n"
         "/stats - Your trading stats\n"
@@ -107,58 +77,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_predict(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /predict command — show trade mode selection."""
-    if await _has_pending_result(context, update.effective_user.id):
-        await update.message.reply_text(
-            "\u26a0\ufe0f Please report the result of your last trade first.\n"
-            "Tap Win, Tie, or Loss below that message before continuing."
-        )
-        return
-
+    """Handle /predict command — show pair selection keyboard."""
     await update.message.reply_text(
-        "Choose a trading mode:",
-        reply_markup=trade_mode_keyboard(),
+        "Choose a trading pair:",
+        reply_markup=pair_selection_keyboard(),
     )
-
-
-async def callback_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle trade mode selection: quick or ai."""
-    query: CallbackQuery = update.callback_query
-    await query.answer()
-
-    data = query.data
-    if not data.startswith("mode:"):
-        return
-
-    mode = data.split(":", 1)[1]
-
-    if mode == "quick":
-        await query.edit_message_text(
-            "Quick Trade - Rule-based signals\n\nChoose a trading pair:",
-            reply_markup=pair_selection_keyboard(),
-        )
-    elif mode == "ai":
-        ml_model = context.bot_data.get("ml_model")
-        if ml_model is None:
-            await query.edit_message_text(format_no_model_available())
-            return
-        # Set AI mode flag in user_data so callback_duration knows
-        context.user_data["ai_mode"] = True
-        await query.edit_message_text(
-            "AI Analysis - ML-powered signals\n\nChoose a trading pair:",
-            reply_markup=pair_selection_keyboard(),
-        )
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /stats command — show win rate and performance."""
-    if await _has_pending_result(context, update.effective_user.id):
-        await update.message.reply_text(
-            "\u26a0\ufe0f Please report the result of your last trade first.\n"
-            "Tap Win, Tie, or Loss below that message before continuing."
-        )
-        return
-
     store: PredictionStore = context.bot_data["prediction_store"]
     telegram_id = update.effective_user.id
 
@@ -172,13 +99,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /recent command — show recent predictions."""
-    if await _has_pending_result(context, update.effective_user.id):
-        await update.message.reply_text(
-            "\u26a0\ufe0f Please report the result of your last trade first.\n"
-            "Tap Win, Tie, or Loss below that message before continuing."
-        )
-        return
-
     store: PredictionStore = context.bot_data["prediction_store"]
     telegram_id = update.effective_user.id
 
@@ -222,189 +142,7 @@ async def callback_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     timeframe_sec = int(parts[2])
     telegram_id = update.effective_user.id
 
-    # Check if AI mode was selected
-    is_ai_mode = context.user_data.pop("ai_mode", False)
-
-    if is_ai_mode:
-        await _handle_ai_duration(query, context, symbol, timeframe_sec, telegram_id)
-    else:
-        await _handle_quick_duration(query, context, symbol, timeframe_sec, telegram_id)
-
-
-async def _handle_ai_duration(
-    query: CallbackQuery,
-    context: ContextTypes.DEFAULT_TYPE,
-    symbol: str,
-    timeframe_sec: int,
-    telegram_id: int,
-) -> None:
-    """Handle AI Analysis duration selection — ML-powered signal."""
-    await query.edit_message_text("\U0001f916 Running AI analysis...")
-
-    try:
-        broker = context.bot_data["broker"]
-        collector: MarketDataCollector = context.bot_data["market_data"]
-
-        if not await broker.is_connected():
-            await query.edit_message_text(
-                "Broker not connected. Please wait a moment and try again."
-            )
-            return
-
-        await collector.request_candles(broker, symbol, timeframe_sec)
-
-        # Wait for candle data — AI needs more candles for stable features
-        df = await _wait_for_candles(collector, symbol, timeframe_sec, CANDLE_WAIT_TIMEOUT)
-
-        min_candles = min_candles_for_timeframe(timeframe_sec)
-        if df is None or len(df) < min_candles:
-            await query.edit_message_text(
-                f"Insufficient market data ({len(df) if df is not None else 0}/{min_candles} candles).\n"
-                f"Try again in a moment or pick a different pair."
-            )
-            return
-
-        # Compute indicators
-        ti = TechnicalIndicators()
-        df_with_indicators = ti.compute(df)
-
-        # Build features with FeatureEngine (pass raw df — build_features computes its own indicators)
-        from infrastructure.features.engine import FeatureEngine
-        feature_engine = FeatureEngine()
-        feature_result = feature_engine.build_features(df)
-
-        last_idx = len(feature_result.features) - 1
-        if not feature_result.valid_mask.iloc[last_idx]:
-            await query.edit_message_text(
-                "Could not compute valid features for this data.\n"
-                "Try a different pair or timeframe."
-            )
-            return
-
-        feature_row = feature_result.features.iloc[last_idx:last_idx + 1]
-
-        # Load ML model and predict
-        ml_model = context.bot_data["ml_model"]
-        if not ml_model.is_trained:
-            await query.edit_message_text(format_no_model_available())
-            return
-        win_probability = float(ml_model.predict_proba(feature_row)[0])
-
-        # Determine direction
-        if win_probability >= 0.55:
-            direction = "call"
-            confidence = win_probability
-        elif win_probability <= 0.45:
-            direction = "put"
-            confidence = 1 - win_probability
-        else:
-            await query.edit_message_text(
-                f"\U0001f916 AI Analysis - No Clear Signal\n\n"
-                f"Win probability: {win_probability:.1%}\n"
-                f"Confidence below threshold (55%).\n"
-                f"Market conditions unclear — try a different pair or time."
-            )
-            return
-
-        # Get current price
-        price = await collector.get_latest_price(symbol)
-        entry_price_float = float(price) if price else float(df.iloc[-1]["close"])
-
-        # Build reasoning from feature importance
-        importance = ml_model.feature_importance()
-        top_features = sorted(importance.items(), key=lambda x: -x[1])[:5]
-
-        # Build indicator snapshot
-        last_row = df_with_indicators.iloc[-1]
-        indicator_snapshot = {}
-        for col in ["rsi", "macd_hist", "bb_pct", "stoch_k", "roc_5"]:
-            if col in last_row.index:
-                val = last_row[col]
-                if pd.notna(val):
-                    indicator_snapshot[col] = float(val)
-
-        # Get model version
-        model_version = "1.0.0"
-        if ml_model.metadata and ml_model.metadata.version:
-            model_version = ml_model.metadata.version
-
-        # Format and send AI signal
-        signal_msg = format_ai_signal(
-            symbol=symbol,
-            direction=direction,
-            win_probability=win_probability,
-            entry_price=entry_price_float,
-            model_version=model_version,
-            top_features=top_features,
-            indicator_snapshot=indicator_snapshot,
-        )
-
-        image_path = _SIGNAL_IMAGES.get(direction)
-        photo_sent = False
-        if image_path and image_path.exists():
-            try:
-                with open(image_path, "rb") as photo_file:
-                    await query.message.delete()
-                    await context.bot.send_photo(
-                        chat_id=telegram_id,
-                        photo=InputFile(photo_file),
-                        caption=signal_msg,
-                    )
-                photo_sent = True
-            except Exception:
-                logger.warning("ai_signal_photo_send_failed", exc_info=True)
-        if not photo_sent:
-            await query.edit_message_text(signal_msg)
-
-        # Save prediction to database
-        now = datetime.now(timezone.utc)
-        expiry = now + timedelta(seconds=timeframe_sec)
-        from uuid import uuid4
-
-        prediction = Prediction(
-            id=uuid4(),
-            telegram_id=telegram_id,
-            symbol=symbol,
-            timeframe_sec=timeframe_sec,
-            direction=direction,
-            confidence=confidence,
-            reasoning=f"AI Model v{model_version}\nWin prob: {win_probability:.1%}\n"
-                      + "\n".join(f"{f}: {imp:.1%}" for f, imp in top_features),
-            indicators=indicator_snapshot,
-            entry_price=Decimal(str(entry_price_float)),
-            entry_time=now,
-            expiry_time=expiry,
-            result=None,
-        )
-
-        store: PredictionStore = context.bot_data["prediction_store"]
-        await store.insert(prediction)
-
-        # Store training data for future model improvement
-        await _store_training_data(
-            context, symbol, timeframe_sec, direction, entry_price_float,
-            feature_result.features.iloc[last_idx].to_dict(),
-            win_probability,
-        )
-
-        confirmation = format_prediction_confirmed(prediction)
-        await context.bot.send_message(chat_id=telegram_id, text=confirmation)
-
-    except Exception:
-        logger.exception("ai_predict_error")
-        await query.edit_message_text(
-            "Error running AI analysis. Please try again."
-        )
-
-
-async def _handle_quick_duration(
-    query: CallbackQuery,
-    context: ContextTypes.DEFAULT_TYPE,
-    symbol: str,
-    timeframe_sec: int,
-    telegram_id: int,
-) -> None:
-    """Handle Quick Trade duration selection — rule-based signal (original flow)."""
+    # Show loading message
     await query.edit_message_text("\u23f3 Analyzing market conditions...")
 
     try:
@@ -447,38 +185,13 @@ async def _handle_quick_duration(
         ti = TechnicalIndicators()
         df_with_indicators = ti.compute(df)
 
-        # Cooldown check — block signals for the same pair within COOLDOWN_BARS
-        cooldown_state: dict[str, int] = context.user_data.setdefault(
-            "signal_cooldown", {}
-        )
-        current_bar = len(df_with_indicators) - 1
-        last_bar = cooldown_state.get(symbol)
-        if last_bar is not None and (current_bar - last_bar) < COOLDOWN_BARS:
-            remaining = COOLDOWN_BARS - (current_bar - last_bar)
-            symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
-            await query.edit_message_text(
-                format_no_signal(
-                    symbol_display,
-                    f"Cooldown — wait {remaining} more bar{'s' if remaining != 1 else ''} "
-                    f"before next signal for this pair",
-                )
-            )
-            return
-
         # Generate signal
         signal = generate_signal(df_with_indicators)
-
-        # Gate: only proceed if signal is valid
-        if not signal.has_signal:
-            symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
-            await query.edit_message_text(
-                format_no_signal(symbol_display, signal.reasoning[0])
-            )
-            return
 
         # Get current price
         price = await collector.get_latest_price(symbol)
         if price is None:
+            # Use last close from candles
             entry_price_float = float(df.iloc[-1]["close"])
         else:
             entry_price_float = float(price)
@@ -525,9 +238,6 @@ async def _handle_quick_duration(
         store: PredictionStore = context.bot_data["prediction_store"]
         await store.insert(prediction)
 
-        # Update cooldown state — prevent rapid re-signals for same pair
-        cooldown_state[symbol] = current_bar
-
         # Send confirmation
         confirmation = format_prediction_confirmed(prediction)
         await context.bot.send_message(chat_id=telegram_id, text=confirmation)
@@ -537,35 +247,6 @@ async def _handle_quick_duration(
         await query.edit_message_text(
             "Error generating prediction. Please try again."
         )
-
-
-async def _store_training_data(
-    context: ContextTypes.DEFAULT_TYPE,
-    symbol: str,
-    timeframe_sec: int,
-    direction: str,
-    entry_price: float,
-    features: dict,
-    win_probability: float,
-) -> None:
-    """Store training data for future model improvement."""
-    try:
-        from apps.manual_trading.database import TrainingDataStore
-
-        store: TrainingDataStore = context.bot_data.get("training_data_store")
-        if store is None:
-            return
-
-        await store.insert(
-            symbol=symbol,
-            timeframe_sec=timeframe_sec,
-            direction=direction,
-            entry_price=entry_price,
-            features=features,
-            win_probability=win_probability,
-        )
-    except Exception:
-        logger.debug("training_data_store_failed", exc_info=True)
 
 
 async def _wait_for_candles(
@@ -599,51 +280,3 @@ async def _wait_for_candles(
         list(collector.get_all_prices().keys())[:10],
     )
     return df
-
-
-async def callback_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle Win / Tie / Loss button press after trade expiry."""
-    query: CallbackQuery = update.callback_query
-    await query.answer()
-
-    data = query.data
-    if not data.startswith("result:"):
-        return
-
-    parts = data.split(":")
-    if len(parts) != 3:
-        return
-
-    prediction_id = parts[1]
-    result = parts[2]
-
-    if result not in ("win", "tie", "loss"):
-        return
-
-    telegram_id = update.effective_user.id
-
-    store: PredictionStore = context.bot_data["prediction_store"]
-
-    try:
-        from uuid import UUID
-
-        await store.resolve(
-            prediction_id=UUID(prediction_id),
-            exit_price=Decimal("0"),
-            result=result,
-        )
-
-        # Confirm to user
-        await query.edit_message_text(text=format_result_recorded(result))
-
-        logger.info(
-            "result_submitted prediction_id=%s result=%s telegram_id=%s",
-            prediction_id,
-            result,
-            telegram_id,
-        )
-    except Exception:
-        logger.exception("result_callback_error")
-        await query.edit_message_text(
-            "Error recording result. Please try again."
-        )

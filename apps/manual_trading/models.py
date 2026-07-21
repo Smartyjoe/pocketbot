@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -32,14 +32,12 @@ class Prediction(BaseModel):
     expiry_time: datetime
     exit_price: Decimal | None = None
     result: str | None = None
-    result_requested_at: datetime | None = None
     created_at: datetime | None = None
 
 
 class Signal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    has_signal: bool
     direction: str
     confidence: float
     reasoning: list[str]

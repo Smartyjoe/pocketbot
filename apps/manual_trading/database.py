@@ -108,50 +108,7 @@ class PredictionStore:
             result=result,
         )
 
-    async def mark_result_requested(self, prediction_id: UUID) -> None:
-        """Mark that we have sent a result-request message for this prediction."""
-        async with self._session_factory() as session:
-            await session.execute(
-                text(
-                    """
-                    UPDATE predictions
-                    SET result_requested_at = NOW()
-                    WHERE id = :id
-                    """
-                ),
-                {"id": str(prediction_id)},
-            )
-            await session.commit()
-
-    async def has_pending_result(self, telegram_id: int) -> bool:
-        """Return True if the user has an unresolved result request waiting.
-
-        Checks for predictions where:
-        - result IS NULL (not yet resolved)
-        - result_requested_at IS NOT NULL (we already asked)
-        - The user hasn't responded yet
-        """
-        async with self._session_factory() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT 1 FROM predictions
-                    WHERE telegram_id = :tid
-                      AND result IS NULL
-                      AND result_requested_at IS NOT NULL
-                    LIMIT 1
-                    """
-                ),
-                {"tid": telegram_id},
-            )
-            return result.scalar_one_or_none() is not None
-
     async def get_pending(self) -> list[dict]:
-        """Return expired predictions that have NOT been asked for a result yet.
-
-        Only returns rows where result_requested_at IS NULL so the
-        tracker asks at most once per prediction.
-        """
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
@@ -160,9 +117,7 @@ class PredictionStore:
                            confidence, reasoning, indicators, entry_price,
                            entry_time, expiry_time
                     FROM predictions
-                    WHERE result IS NULL
-                      AND expiry_time <= :now
-                      AND result_requested_at IS NULL
+                    WHERE result IS NULL AND expiry_time <= :now
                     FOR UPDATE SKIP LOCKED
                     """
                 ),
@@ -255,105 +210,3 @@ class PredictionStore:
             )
             rows = result.mappings().all()
         return [dict(row) for row in rows]
-
-
-class TrainingDataStore:
-    """Stores feature snapshots and outcomes for ML model training.
-
-    Each AI Analysis prediction stores its feature vector alongside
-    the entry context. When the user reports Win/Loss/Tie, the
-    corresponding prediction row is updated with the outcome. A
-    training job can then join predictions + training_data to build
-    labeled datasets.
-    """
-
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
-
-    async def insert(
-        self,
-        symbol: str,
-        timeframe_sec: int,
-        direction: str,
-        entry_price: float,
-        features: dict,
-        win_probability: float,
-    ) -> None:
-        """Store a feature snapshot for an AI Analysis prediction."""
-        async with self._session_factory() as session:
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO training_data
-                        (symbol, timeframe_sec, direction, entry_price,
-                         features, win_probability)
-                    VALUES
-                        (:symbol, :timeframe_sec, :direction, :entry_price,
-                         :features, :win_probability)
-                    """
-                ),
-                {
-                    "symbol": symbol,
-                    "timeframe_sec": timeframe_sec,
-                    "direction": direction,
-                    "entry_price": entry_price,
-                    "features": _sanitize_for_json(features),
-                    "win_probability": win_probability,
-                },
-            )
-            await session.commit()
-
-    async def get_unlabeled(self, limit: int = 500) -> list[dict]:
-        """Get training data rows that have been labeled with outcomes.
-
-        Joins training_data with predictions to get feature vectors
-        paired with their Win/Loss outcomes.
-        """
-        async with self._session_factory() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT
-                        t.symbol,
-                        t.timeframe_sec,
-                        t.direction,
-                        t.entry_price,
-                        t.features,
-                        t.win_probability,
-                        p.result,
-                        p.entry_time,
-                        p.expiry_time
-                    FROM training_data t
-                    JOIN predictions p ON
-                        p.telegram_id = (
-                            SELECT telegram_id FROM predictions
-                            WHERE entry_price = t.entry_price
-                              AND symbol = t.symbol
-                              AND entry_time IS NOT NULL
-                            LIMIT 1
-                        )
-                        AND p.symbol = t.symbol
-                        AND ABS(p.entry_price - t.entry_price) < 0.0001
-                        AND p.result IS NOT NULL
-                    WHERE p.result IN ('win', 'loss')
-                    ORDER BY t.created_at DESC
-                    LIMIT :limit
-                    """
-                ),
-                {"limit": limit},
-            )
-            rows = result.mappings().all()
-        return [dict(row) for row in rows]
-
-    async def count_labeled(self) -> int:
-        """Count how many labeled training samples we have."""
-        async with self._session_factory() as session:
-            result = await session.execute(
-                text(
-                    "SELECT COUNT(*) as cnt FROM training_data t "
-                    "JOIN predictions p ON p.symbol = t.symbol "
-                    "AND ABS(p.entry_price - t.entry_price) < 0.0001 "
-                    "WHERE p.result IN ('win', 'loss')"
-                )
-            )
-            return result.scalar_one()

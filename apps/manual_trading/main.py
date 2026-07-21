@@ -9,6 +9,7 @@ for market data. No per-user SSID is needed for manual trading mode.
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal as signal_module
 import sys
 from pathlib import Path
@@ -20,16 +21,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from sqlalchemy import text
-
 from config.settings import load_settings
 from infrastructure.persistence.database import init_db
 from infrastructure.broker.pocket_option import PocketOptionBroker
 from apps.manual_trading.bot import ManualTradingBot
-from apps.manual_trading.database import PredictionStore, TrainingDataStore
+from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.market_data import MarketDataCollector
 from apps.manual_trading.trade_tracker import TradeTracker
-from infrastructure.ml.model import TradingModel
 
 logger = structlog.get_logger()
 
@@ -83,70 +81,22 @@ async def main() -> None:
         logger.error("db_unavailable_cannot_start")
         return
 
-    # Ensure result_requested_at column exists (idempotent migration)
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text(
-                "ALTER TABLE predictions "
-                "ADD COLUMN IF NOT EXISTS result_requested_at TIMESTAMPTZ"
-            ))
-            await conn.commit()
-        logger.info("migration_result_requested_at_applied")
-    except Exception:
-        logger.warning("migration_result_requested_at_failed", exc_info=True)
-
-    # Ensure training_data table exists (idempotent migration)
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text(
-                """
-                CREATE TABLE IF NOT EXISTS training_data (
-                    id SERIAL PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    timeframe_sec INT NOT NULL,
-                    direction TEXT NOT NULL,
-                    entry_price DOUBLE PRECISION NOT NULL,
-                    features JSONB NOT NULL,
-                    win_probability DOUBLE PRECISION,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-                """
-            ))
-            await conn.commit()
-        logger.info("migration_training_data_applied")
-    except Exception:
-        logger.warning("migration_training_data_failed", exc_info=True)
-
     # Initialize components
     prediction_store = PredictionStore(session_factory)
-    training_data_store = TrainingDataStore(session_factory)
     market_data = MarketDataCollector()
     broker = PocketOptionBroker(config=settings.broker)
-
-    # Load ML model if available
-    ml_model = TradingModel()
-    model_dir = PROJECT_ROOT / "storage" / "models" / "ml"
-    if (model_dir / "model.joblib").exists():
-        try:
-            ml_model.load(model_dir)
-            logger.info(
-                "ml_model_loaded",
-                version=ml_model.metadata.version if ml_model.metadata else "unknown",
-            )
-        except Exception:
-            logger.warning("ml_model_load_failed", exc_info=True)
-    else:
-        logger.info("ml_model_not_found_at path=%s", str(model_dir))
 
     # Register market data collector as a message handler
     broker.on_message(market_data.make_message_handler())
 
-    # Trade tracker — sends Win/Tie/Loss buttons when predictions expire
+    # Trade tracker — resolves predictions when they expire
     trade_tracker = TradeTracker(
         prediction_store=prediction_store,
         get_price_fn=market_data.get_latest_price,
-        send_message_fn=_make_send_message_fn(
+        notify_fn=lambda tid, msg: _send_telegram_message(
             settings.telegram.bot_token.get_secret_value(),
+            tid,
+            msg,
         ),
     )
 
@@ -166,9 +116,7 @@ async def main() -> None:
     app = bot.build(
         broker=broker,
         prediction_store=prediction_store,
-        training_data_store=training_data_store,
         market_data=market_data,
-        ml_model=ml_model,
     )
 
     # Start the Telegram bot
@@ -214,24 +162,12 @@ async def main() -> None:
     logger.info("manual_trading_bot_stopped")
 
 
-def _make_send_message_fn(bot_token: str):
-    """Return an async function that sends Telegram messages with keyboards."""
+async def _send_telegram_message(bot_token: str, chat_id: int, text: str) -> None:
+    """Send a Telegram message directly (for trade tracker notifications)."""
+    from telegram import Bot
 
-    async def _send(
-        chat_id: int,
-        text: str,
-        reply_markup=None,
-    ) -> None:
-        from telegram import Bot
-
-        bot = Bot(token=bot_token)
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=reply_markup,
-        )
-
-    return _send
+    bot = Bot(token=bot_token)
+    await bot.send_message(chat_id=chat_id, text=text)
 
 
 if __name__ == "__main__":
