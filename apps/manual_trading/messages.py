@@ -16,18 +16,52 @@ def format_signal(symbol: str, signal: Signal, entry_price: float) -> str:
 
     lines = [
         f"{dir_icon} {direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
-        f"",
+        "",
         f"Direction: {direction_label}",
         f"Confidence: {signal.confidence:.0%}",
         f"Entry Price: {entry_price:.5f}",
-        f"",
-        "Analysis:",
     ]
+
+    # Extract trend info from reasoning bullets for the header
+    trend_line = next(
+        (b for b in signal.reasoning if "trend" in b.lower() or "EMA" in b),
+        None,
+    )
+    if trend_line:
+        lines.append(f"Trend: {trend_line}")
+
+    # Extract entry zone from reasoning bullets for the header
+    entry_line = next(
+        (
+            b
+            for b in signal.reasoning
+            if "RSI" in b and any(
+                kw in b.lower() for kw in ("dip", "sell zone", "entry zone")
+            )
+        ),
+        None,
+    )
+    if entry_line:
+        lines.append(f"Entry Zone: {entry_line}")
+
+    lines.append("")
+    lines.append("Analysis:")
 
     for bullet in signal.reasoning:
         lines.append(f"  - {bullet}")
 
     return "\n".join(lines)
+
+
+def format_no_signal(symbol: str, reason: str) -> str:
+    """Format message when no trade signal is available."""
+    symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
+    return (
+        f"No clear signal for {symbol_display}\n\n"
+        f"Market conditions aren't favorable for a trade right now.\n\n"
+        f"Reason: {reason}\n\n"
+        f"Try again in a few minutes."
+    )
 
 
 def format_prediction_confirmed(prediction: Prediction) -> str:
@@ -44,6 +78,35 @@ def format_prediction_confirmed(prediction: Prediction) -> str:
         f"Expires: {prediction.expiry_time.strftime('%H:%M:%S UTC')}\n\n"
         f"Tracking price movement..."
     )
+
+
+def format_result_request(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    timeframe_sec: int,
+) -> str:
+    """Format the message asking the user to confirm trade outcome."""
+    symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
+    direction_label = "CALL" if direction == "call" else "PUT"
+
+    return (
+        f"\u23f0 Trade Expired\n\n"
+        f"{direction_label} {symbol_display}\n"
+        f"Entry: {entry_price:.5f}\n"
+        f"Duration: {_duration_label(timeframe_sec)}\n\n"
+        f"What was the result?"
+    )
+
+
+def format_result_recorded(result: str) -> str:
+    """Format confirmation after the user submits a result."""
+    if result == "win":
+        return "\u2705 Result recorded: WIN"
+    elif result == "loss":
+        return "\u274c Result recorded: LOSS"
+    else:
+        return "\U0001f504 Result recorded: TIE"
 
 
 def format_prediction_expired(
@@ -125,3 +188,96 @@ def _duration_label(seconds: int) -> str:
         if opt.seconds == seconds:
             return opt.label
     return f"{seconds}s"
+
+
+def format_ai_signal(
+    symbol: str,
+    direction: str,
+    win_probability: float,
+    entry_price: float,
+    model_version: str,
+    top_features: list[tuple[str, float]],
+    indicator_snapshot: dict[str, float],
+) -> str:
+    """Format an AI analysis signal into a Telegram message."""
+    if direction == "call":
+        dir_icon = "\U0001f7e2"
+        direction_emoji = "CALL"
+        direction_label = "CALL (Up)"
+    else:
+        dir_icon = "\U0001f534"
+        direction_emoji = "PUT"
+        direction_label = "PUT (Down)"
+
+    confidence_pct = win_probability if direction == "call" else 1 - win_probability
+
+    lines = [
+        f"{dir_icon} {direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
+        "",
+        f"Direction: {direction_label}",
+        f"Win Probability: {win_probability:.1%}",
+        f"Confidence: {confidence_pct:.0%}",
+        f"Entry Price: {entry_price:.5f}",
+        f"Model: v{model_version}",
+        "",
+        "Key Features:",
+    ]
+
+    for feat_name, importance in top_features[:5]:
+        feat_display = feat_name.replace("_", " ").title()
+        lines.append(f"  - {feat_display}: {importance:.1%} importance")
+
+    if indicator_snapshot:
+        lines.append("")
+        lines.append("Indicators:")
+        key_indicators = ["rsi", "macd_hist", "bb_pct", "stoch_k", "roc_5"]
+        for ind in key_indicators:
+            val = indicator_snapshot.get(ind)
+            if val is not None:
+                lines.append(f"  - {ind.upper()}: {val:.4f}")
+
+    return "\n".join(lines)
+
+
+def format_no_model_available() -> str:
+    """Format message when ML model is not yet trained."""
+    return (
+        "\U0001f916 AI Analysis - Model Not Available\n\n"
+        "The ML model has not been trained yet.\n"
+        "Use Quick Trade for rule-based signals.\n\n"
+        "The model will be trained automatically once\n"
+        "sufficient trade history is collected."
+    )
+
+
+def format_ai_model_info(model_metadata: dict | None) -> str:
+    """Format ML model information for the user."""
+    if model_metadata is None:
+        return "No model trained yet."
+
+    metrics = model_metadata.get("metrics")
+    lines = [
+        "\U0001f916 AI Model Info",
+        "",
+        f"Version: {model_metadata.get('version', 'N/A')}",
+        f"Trained: {model_metadata.get('created_at', 'N/A')[:10]}",
+    ]
+
+    if metrics:
+        lines.extend([
+            "",
+            "Performance:",
+            f"  Accuracy: {metrics.get('accuracy', 0):.1%}",
+            f"  Precision: {metrics.get('precision', 0):.1%}",
+            f"  Recall: {metrics.get('recall', 0):.1%}",
+            f"  F1 Score: {metrics.get('f1', 0):.1%}",
+            f"  AUC: {metrics.get('auc', 0):.3f}",
+            f"  Train samples: {metrics.get('train_samples', 0)}",
+            f"  Test samples: {metrics.get('test_samples', 0)}",
+        ])
+
+    feature_names = model_metadata.get("feature_names", [])
+    if feature_names:
+        lines.append(f"\nFeatures: {len(feature_names)}")
+
+    return "\n".join(lines)

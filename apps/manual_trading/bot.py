@@ -3,14 +3,11 @@ from __future__ import annotations
 
 import logging
 
-from telegram import BotCommand, Update
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from apps.manual_trading.handlers import (
@@ -21,6 +18,8 @@ from apps.manual_trading.handlers import (
     cmd_recent,
     callback_pair,
     callback_duration,
+    callback_result,
+    callback_mode,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,10 +52,16 @@ class ManualTradingBot:
 
         # Callback queries (inline keyboard buttons)
         self._app.add_handler(
+            CallbackQueryHandler(callback_mode, pattern=r"^mode:")
+        )
+        self._app.add_handler(
             CallbackQueryHandler(callback_pair, pattern=r"^pair:")
         )
         self._app.add_handler(
             CallbackQueryHandler(callback_duration, pattern=r"^dur:")
+        )
+        self._app.add_handler(
+            CallbackQueryHandler(callback_result, pattern=r"^result:")
         )
 
         return self._app

@@ -62,3 +62,23 @@ MIN_CANDLES_BY_TIMEFRAME: dict[int, int] = {
 def min_candles_for_timeframe(timeframe_sec: int) -> int:
     """Return the minimum candles needed for a given timeframe."""
     return MIN_CANDLES_BY_TIMEFRAME.get(timeframe_sec, 10)
+
+
+# --- Always-Signal Directional Confidence Strategy Constants ---
+
+# Trend strength thresholds (normalized EMA cross magnitude = |ema_fast - ema_slow| / close).
+# Strong trend gets high confidence bonus, mild trend gets moderate bonus.
+TREND_STRONG_THRESHOLD: float = 0.002
+TREND_MILD_THRESHOLD: float = 0.0005
+
+# RSI boundaries for favorability scoring.
+# Below 35 in downtrend = favorable (oversold bounce). Above 65 in uptrend = favorable.
+RSI_FAVORABLE_LOW: float = 35.0
+RSI_FAVORABLE_HIGH: float = 65.0
+
+# ATR volatility penalty: reduce confidence when ATR% > multiplier * SMA(ATR%, window).
+ATR_SPIKE_MULTIPLIER: float = 2.0
+ATR_SMA_WINDOW: int = 10  # longest feasible with 16-30 candles
+
+# Cooldown: minimum bars between signals for the same pair (handler-layer).
+COOLDOWN_BARS: int = 3

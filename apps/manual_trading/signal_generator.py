@@ -46,6 +46,7 @@ def generate_signal(df_with_indicators: pd.DataFrame) -> Signal:
             confidence=0.5,
             reasoning=["Insufficient data for analysis"],
             indicators={},
+            has_signal=False,
         )
 
     last = df_with_indicators.iloc[-1]
@@ -166,6 +167,7 @@ def generate_signal(df_with_indicators: pd.DataFrame) -> Signal:
             confidence=0.5,
             reasoning=["No clear signal from indicators"],
             indicators=indicator_snapshot,
+            has_signal=False,
         )
 
     call_weight = sum(w for d, w in votes if d == "call")
@@ -194,6 +196,7 @@ def generate_signal(df_with_indicators: pd.DataFrame) -> Signal:
         confidence=round(confidence, 2),
         reasoning=reasoning[:5],
         indicators=_clean_nan(indicator_snapshot),
+        has_signal=True,
     )
 
 
