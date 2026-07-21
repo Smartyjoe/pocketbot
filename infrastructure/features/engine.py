@@ -88,10 +88,10 @@ class FeatureEngine:
         return len(df) >= self._config.min_rows
 
     def _normalize(self, features: pd.DataFrame) -> pd.DataFrame:
-        out = features.copy()
+        out = features.loc[:, ~features.columns.duplicated()].copy()
         for col in out.columns:
             series = out[col]
-            if series.notna().sum() < 2:
+            if int(series.notna().sum()) < 2:
                 continue
             mean = series.mean()
             std = series.std()

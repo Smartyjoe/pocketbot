@@ -266,10 +266,10 @@ async def _handle_ai_duration(
         ti = TechnicalIndicators()
         df_with_indicators = ti.compute(df)
 
-        # Build features with FeatureEngine
+        # Build features with FeatureEngine (pass raw df — build_features computes its own indicators)
         from infrastructure.features.engine import FeatureEngine
         feature_engine = FeatureEngine()
-        feature_result = feature_engine.build_features(df_with_indicators)
+        feature_result = feature_engine.build_features(df)
 
         last_idx = len(feature_result.features) - 1
         if not feature_result.valid_mask.iloc[last_idx]:
