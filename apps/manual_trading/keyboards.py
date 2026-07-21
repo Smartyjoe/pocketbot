@@ -7,6 +7,25 @@ from apps.manual_trading.models import DURATION_OPTIONS
 from apps.manual_trading.constants import POPULAR_PAIRS
 
 
+def trade_mode_keyboard() -> InlineKeyboardMarkup:
+    """Show trade mode selection: Quick Trade or AI Analysis."""
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="\u26a1 Quick Trade",
+                callback_data="mode:quick",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="\U0001f916 AI Analysis",
+                callback_data="mode:ai",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def pair_selection_keyboard() -> InlineKeyboardMarkup:
     """Show popular trading pairs for the user to pick from."""
     buttons = []

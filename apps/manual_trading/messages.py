@@ -154,3 +154,96 @@ def _duration_label(seconds: int) -> str:
         if opt.seconds == seconds:
             return opt.label
     return f"{seconds}s"
+
+
+def format_ai_signal(
+    symbol: str,
+    direction: str,
+    win_probability: float,
+    entry_price: float,
+    model_version: str,
+    top_features: list[tuple[str, float]],
+    indicator_snapshot: dict[str, float],
+) -> str:
+    """Format an AI analysis signal into a Telegram message."""
+    if direction == "call":
+        dir_icon = "\U0001f7e2"
+        direction_emoji = "CALL"
+        direction_label = "CALL (Up)"
+    else:
+        dir_icon = "\U0001f534"
+        direction_emoji = "PUT"
+        direction_label = "PUT (Down)"
+
+    confidence_pct = win_probability if direction == "call" else 1 - win_probability
+
+    lines = [
+        f"{dir_icon} {direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
+        "",
+        f"Direction: {direction_label}",
+        f"Win Probability: {win_probability:.1%}",
+        f"Confidence: {confidence_pct:.0%}",
+        f"Entry Price: {entry_price:.5f}",
+        f"Model: v{model_version}",
+        "",
+        "Key Features:",
+    ]
+
+    for feat_name, importance in top_features[:5]:
+        feat_display = feat_name.replace("_", " ").title()
+        lines.append(f"  - {feat_display}: {importance:.1%} importance")
+
+    if indicator_snapshot:
+        lines.append("")
+        lines.append("Indicators:")
+        key_indicators = ["rsi", "macd_hist", "bb_pct", "stoch_k", "roc_5"]
+        for ind in key_indicators:
+            val = indicator_snapshot.get(ind)
+            if val is not None:
+                lines.append(f"  - {ind.upper()}: {val:.4f}")
+
+    return "\n".join(lines)
+
+
+def format_no_model_available() -> str:
+    """Format message when ML model is not yet trained."""
+    return (
+        "\U0001f916 AI Analysis - Model Not Available\n\n"
+        "The ML model has not been trained yet.\n"
+        "Use Quick Trade for rule-based signals.\n\n"
+        "The model will be trained automatically once\n"
+        "sufficient trade history is collected."
+    )
+
+
+def format_ai_model_info(model_metadata: dict | None) -> str:
+    """Format ML model information for the user."""
+    if model_metadata is None:
+        return "No model trained yet."
+
+    metrics = model_metadata.get("metrics")
+    lines = [
+        "\U0001f916 AI Model Info",
+        "",
+        f"Version: {model_metadata.get('version', 'N/A')}",
+        f"Trained: {model_metadata.get('created_at', 'N/A')[:10]}",
+    ]
+
+    if metrics:
+        lines.extend([
+            "",
+            "Performance:",
+            f"  Accuracy: {metrics.get('accuracy', 0):.1%}",
+            f"  Precision: {metrics.get('precision', 0):.1%}",
+            f"  Recall: {metrics.get('recall', 0):.1%}",
+            f"  F1 Score: {metrics.get('f1', 0):.1%}",
+            f"  AUC: {metrics.get('auc', 0):.3f}",
+            f"  Train samples: {metrics.get('train_samples', 0)}",
+            f"  Test samples: {metrics.get('test_samples', 0)}",
+        ])
+
+    feature_names = model_metadata.get("feature_names", [])
+    if feature_names:
+        lines.append(f"\nFeatures: {len(feature_names)}")
+
+    return "\n".join(lines)

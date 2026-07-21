@@ -22,6 +22,7 @@ from apps.manual_trading.handlers import (
     callback_pair,
     callback_duration,
     callback_result,
+    callback_mode,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class ManualTradingBot:
         self._app.add_handler(CommandHandler("recent", cmd_recent))
 
         # Callback queries (inline keyboard buttons)
+        self._app.add_handler(
+            CallbackQueryHandler(callback_mode, pattern=r"^mode:")
+        )
         self._app.add_handler(
             CallbackQueryHandler(callback_pair, pattern=r"^pair:")
         )

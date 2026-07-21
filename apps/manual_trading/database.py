@@ -255,3 +255,105 @@ class PredictionStore:
             )
             rows = result.mappings().all()
         return [dict(row) for row in rows]
+
+
+class TrainingDataStore:
+    """Stores feature snapshots and outcomes for ML model training.
+
+    Each AI Analysis prediction stores its feature vector alongside
+    the entry context. When the user reports Win/Loss/Tie, the
+    corresponding prediction row is updated with the outcome. A
+    training job can then join predictions + training_data to build
+    labeled datasets.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def insert(
+        self,
+        symbol: str,
+        timeframe_sec: int,
+        direction: str,
+        entry_price: float,
+        features: dict,
+        win_probability: float,
+    ) -> None:
+        """Store a feature snapshot for an AI Analysis prediction."""
+        async with self._session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO training_data
+                        (symbol, timeframe_sec, direction, entry_price,
+                         features, win_probability)
+                    VALUES
+                        (:symbol, :timeframe_sec, :direction, :entry_price,
+                         :features, :win_probability)
+                    """
+                ),
+                {
+                    "symbol": symbol,
+                    "timeframe_sec": timeframe_sec,
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "features": _sanitize_for_json(features),
+                    "win_probability": win_probability,
+                },
+            )
+            await session.commit()
+
+    async def get_unlabeled(self, limit: int = 500) -> list[dict]:
+        """Get training data rows that have been labeled with outcomes.
+
+        Joins training_data with predictions to get feature vectors
+        paired with their Win/Loss outcomes.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT
+                        t.symbol,
+                        t.timeframe_sec,
+                        t.direction,
+                        t.entry_price,
+                        t.features,
+                        t.win_probability,
+                        p.result,
+                        p.entry_time,
+                        p.expiry_time
+                    FROM training_data t
+                    JOIN predictions p ON
+                        p.telegram_id = (
+                            SELECT telegram_id FROM predictions
+                            WHERE entry_price = t.entry_price
+                              AND symbol = t.symbol
+                              AND entry_time IS NOT NULL
+                            LIMIT 1
+                        )
+                        AND p.symbol = t.symbol
+                        AND ABS(p.entry_price - t.entry_price) < 0.0001
+                        AND p.result IS NOT NULL
+                    WHERE p.result IN ('win', 'loss')
+                    ORDER BY t.created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            )
+            rows = result.mappings().all()
+        return [dict(row) for row in rows]
+
+    async def count_labeled(self) -> int:
+        """Count how many labeled training samples we have."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) as cnt FROM training_data t "
+                    "JOIN predictions p ON p.symbol = t.symbol "
+                    "AND ABS(p.entry_price - t.entry_price) < 0.0001 "
+                    "WHERE p.result IN ('win', 'loss')"
+                )
+            )
+            return result.scalar_one()
