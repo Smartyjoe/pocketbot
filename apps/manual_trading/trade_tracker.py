@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
 
 from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.keyboards import result_feedback_keyboard

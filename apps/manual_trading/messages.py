@@ -16,11 +16,11 @@ def format_signal(symbol: str, signal: Signal, entry_price: float) -> str:
 
     lines = [
         f"{dir_icon} {direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
-        f"",
+        "",
         f"Direction: {direction_label}",
         f"Confidence: {signal.confidence:.0%}",
         f"Entry Price: {entry_price:.5f}",
-        f"",
+        "",
         "Analysis:",
     ]
 

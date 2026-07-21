@@ -3,14 +3,11 @@ from __future__ import annotations
 
 import logging
 
-from telegram import BotCommand, Update
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from apps.manual_trading.handlers import (

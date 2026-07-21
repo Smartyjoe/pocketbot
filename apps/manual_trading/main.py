@@ -9,7 +9,6 @@ for market data. No per-user SSID is needed for manual trading mode.
 from __future__ import annotations
 
 import asyncio
-import logging
 import signal as signal_module
 import sys
 from pathlib import Path

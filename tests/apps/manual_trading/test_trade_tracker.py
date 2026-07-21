@@ -1,19 +1,19 @@
 """Tests for trade tracker."""
-import asyncio
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
-from apps.manual_trading.trade_tracker import TradeTracker, CHECK_INTERVAL, RESOLVE_GRACE_SECONDS
+from apps.manual_trading.trade_tracker import TradeTracker, RESOLVE_GRACE_SECONDS
 
 
 @pytest.fixture
 def mock_store():
     store = AsyncMock()
     store.get_pending = AsyncMock(return_value=[])
-    store.resolve = AsyncMock()
+    store.mark_result_requested = AsyncMock()
     return store
 
 
@@ -23,16 +23,16 @@ def mock_get_price():
 
 
 @pytest.fixture
-def mock_notify():
+def mock_send_message():
     return AsyncMock()
 
 
 @pytest.fixture
-def tracker(mock_store, mock_get_price, mock_notify):
+def tracker(mock_store, mock_get_price, mock_send_message):
     return TradeTracker(
         prediction_store=mock_store,
         get_price_fn=mock_get_price,
-        notify_fn=mock_notify,
+        send_message_fn=mock_send_message,
     )
 
 
@@ -43,19 +43,20 @@ class TestTradeTracker:
 
     @pytest.mark.asyncio
     async def test_check_pending_empty(self, tracker: TradeTracker, mock_store) -> None:
-        """No pending predictions — nothing happens."""
+        """No pending predictions -- nothing happens."""
         await tracker._check_pending()
-        mock_store.resolve.assert_not_called()
+        mock_store.mark_result_requested.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_check_pending_resolves_expired(
-        self, tracker: TradeTracker, mock_store, mock_get_price, mock_notify
+    async def test_check_pending_sends_result_request(
+        self, tracker: TradeTracker, mock_store, mock_send_message
     ) -> None:
-        """Expired prediction with price available — resolve as win/loss."""
+        """Expired prediction with result_requested_at=None -- send result-request."""
         now = datetime.now(timezone.utc)
+        prediction_id = uuid4()
         mock_store.get_pending.return_value = [
             {
-                "id": "test-id-1",
+                "id": prediction_id,
                 "telegram_id": 123,
                 "symbol": "EURUSD_otc",
                 "timeframe_sec": 60,
@@ -68,24 +69,62 @@ class TestTradeTracker:
                 "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
             }
         ]
-        mock_get_price.return_value = Decimal("1.0860")
 
         await tracker._check_pending()
 
-        mock_store.resolve.assert_called_once()
-        call_kwargs = mock_store.resolve.call_args[1]
-        assert call_kwargs["result"] == "win"
-        mock_notify.assert_called_once()
+        mock_send_message.assert_called_once()
+        call_args = mock_send_message.call_args
+        assert call_args[0][0] == 123  # telegram_id
+        assert "Trade Expired" in call_args[0][1]
+        assert "Win" in str(call_args[1].get("reply_markup", ""))
+        mock_store.mark_result_requested.assert_called_once_with(prediction_id)
 
     @pytest.mark.asyncio
-    async def test_check_pending_resolves_loss(
-        self, tracker: TradeTracker, mock_store, mock_get_price
+    async def test_check_pending_sends_message_with_keyboard(
+        self, tracker: TradeTracker, mock_store, mock_send_message
     ) -> None:
-        """Expired prediction where price went down for a CALL — resolve as loss."""
+        """Result-request includes inline keyboard with Win/Tie/Loss buttons."""
         now = datetime.now(timezone.utc)
+        prediction_id = uuid4()
         mock_store.get_pending.return_value = [
             {
-                "id": "test-id-2",
+                "id": prediction_id,
+                "telegram_id": 456,
+                "symbol": "GBPUSD_otc",
+                "timeframe_sec": 300,
+                "direction": "put",
+                "confidence": 0.82,
+                "reasoning": "test",
+                "indicators": {},
+                "entry_price": 1.2650,
+                "entry_time": now - timedelta(seconds=300),
+                "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
+            }
+        ]
+
+        await tracker._check_pending()
+
+        call_args = mock_send_message.call_args
+        reply_markup = call_args[1]["reply_markup"]
+        # Should have 3 buttons: Win, Tie, Loss
+        assert len(reply_markup.inline_keyboard) == 1
+        assert len(reply_markup.inline_keyboard[0]) == 3
+        button_texts = [btn.text for btn in reply_markup.inline_keyboard[0]]
+        assert any("Win" in t for t in button_texts)
+        assert any("Tie" in t for t in button_texts)
+        assert any("Loss" in t for t in button_texts)
+
+    @pytest.mark.asyncio
+    async def test_check_pending_multiple_expired(
+        self, tracker: TradeTracker, mock_store, mock_send_message
+    ) -> None:
+        """Multiple expired predictions all get result-request messages."""
+        now = datetime.now(timezone.utc)
+        id1 = uuid4()
+        id2 = uuid4()
+        mock_store.get_pending.return_value = [
+            {
+                "id": id1,
                 "telegram_id": 123,
                 "symbol": "EURUSD_otc",
                 "timeframe_sec": 60,
@@ -96,80 +135,36 @@ class TestTradeTracker:
                 "entry_price": 1.0850,
                 "entry_time": now - timedelta(seconds=60),
                 "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
-            }
-        ]
-        mock_get_price.return_value = Decimal("1.0840")
-
-        await tracker._check_pending()
-
-        call_kwargs = mock_store.resolve.call_args[1]
-        assert call_kwargs["result"] == "loss"
-
-    @pytest.mark.asyncio
-    async def test_check_pending_put_direction(
-        self, tracker: TradeTracker, mock_store, mock_get_price
-    ) -> None:
-        """PUT direction — price going down is a win."""
-        now = datetime.now(timezone.utc)
-        mock_store.get_pending.return_value = [
+            },
             {
-                "id": "test-id-3",
-                "telegram_id": 123,
-                "symbol": "EURUSD_otc",
+                "id": id2,
+                "telegram_id": 456,
+                "symbol": "GBPUSD_otc",
                 "timeframe_sec": 60,
                 "direction": "put",
-                "confidence": 0.78,
+                "confidence": 0.82,
                 "reasoning": "test",
                 "indicators": {},
-                "entry_price": 1.0850,
+                "entry_price": 1.2650,
                 "entry_time": now - timedelta(seconds=60),
                 "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
-            }
+            },
         ]
-        mock_get_price.return_value = Decimal("1.0840")
 
         await tracker._check_pending()
 
-        call_kwargs = mock_store.resolve.call_args[1]
-        assert call_kwargs["result"] == "win"
+        assert mock_send_message.call_count == 2
+        assert mock_store.mark_result_requested.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_check_pending_price_unavailable(
-        self, tracker: TradeTracker, mock_store, mock_get_price
+    async def test_within_grace_period_not_sent(
+        self, tracker: TradeTracker, mock_store, mock_send_message
     ) -> None:
-        """Price unavailable — resolve as tie."""
+        """Expired but within grace period -- should NOT send result-request yet."""
         now = datetime.now(timezone.utc)
         mock_store.get_pending.return_value = [
             {
-                "id": "test-id-4",
-                "telegram_id": 123,
-                "symbol": "EURUSD_otc",
-                "timeframe_sec": 60,
-                "direction": "call",
-                "confidence": 0.78,
-                "reasoning": "test",
-                "indicators": {},
-                "entry_price": 1.0850,
-                "entry_time": now - timedelta(seconds=60),
-                "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
-            }
-        ]
-        mock_get_price.return_value = None
-
-        await tracker._check_pending()
-
-        call_kwargs = mock_store.resolve.call_args[1]
-        assert call_kwargs["result"] == "tie"
-
-    @pytest.mark.asyncio
-    async def test_within_grace_period_not_resolved(
-        self, tracker: TradeTracker, mock_store, mock_get_price
-    ) -> None:
-        """Expired but within grace period — should NOT be resolved yet."""
-        now = datetime.now(timezone.utc)
-        mock_store.get_pending.return_value = [
-            {
-                "id": "test-id-grace",
+                "id": uuid4(),
                 "telegram_id": 123,
                 "symbol": "EURUSD_otc",
                 "timeframe_sec": 60,
@@ -182,21 +177,20 @@ class TestTradeTracker:
                 "expiry_time": now - timedelta(seconds=3),
             }
         ]
-        mock_get_price.return_value = Decimal("1.0860")
 
         await tracker._check_pending()
 
-        mock_store.resolve.assert_not_called()
+        mock_send_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_check_pending_not_yet_expired(
         self, tracker: TradeTracker, mock_store
     ) -> None:
-        """Prediction not yet expired — skip it."""
+        """Prediction not yet expired -- skip it."""
         future = datetime.now(timezone.utc) + timedelta(hours=1)
         mock_store.get_pending.return_value = [
             {
-                "id": "test-id-5",
+                "id": uuid4(),
                 "telegram_id": 123,
                 "symbol": "EURUSD_otc",
                 "timeframe_sec": 60,
@@ -212,17 +206,17 @@ class TestTradeTracker:
 
         await tracker._check_pending()
 
-        mock_store.resolve.assert_not_called()
+        mock_store.mark_result_requested.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_exact_price_is_tie(
-        self, tracker: TradeTracker, mock_store, mock_get_price
+    async def test_send_message_failure_does_not_crash(
+        self, tracker: TradeTracker, mock_store, mock_send_message
     ) -> None:
-        """Price exactly equals entry — resolve as tie."""
+        """If sending the message fails, the tracker continues."""
         now = datetime.now(timezone.utc)
         mock_store.get_pending.return_value = [
             {
-                "id": "test-id-6",
+                "id": uuid4(),
                 "telegram_id": 123,
                 "symbol": "EURUSD_otc",
                 "timeframe_sec": 60,
@@ -235,9 +229,68 @@ class TestTradeTracker:
                 "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
             }
         ]
-        mock_get_price.return_value = Decimal("1.0850")
+        mock_send_message.side_effect = Exception("Telegram API error")
+
+        # Should not raise
+        await tracker._check_pending()
+
+        # mark_result_requested should NOT be called since send failed
+        mock_store.mark_result_requested.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_grace_period_exact_boundary(
+        self, tracker: TradeTracker, mock_store, mock_send_message
+    ) -> None:
+        """Exactly at expiry + grace boundary -- should send."""
+        now = datetime.now(timezone.utc)
+        mock_store.get_pending.return_value = [
+            {
+                "id": uuid4(),
+                "telegram_id": 123,
+                "symbol": "EURUSD_otc",
+                "timeframe_sec": 60,
+                "direction": "call",
+                "confidence": 0.78,
+                "reasoning": "test",
+                "indicators": {},
+                "entry_price": 1.0850,
+                "entry_time": now - timedelta(seconds=60),
+                "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS),
+            }
+        ]
 
         await tracker._check_pending()
 
-        call_kwargs = mock_store.resolve.call_args[1]
-        assert call_kwargs["result"] == "tie"
+        mock_send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_prediction_id_in_callback_data(
+        self, tracker: TradeTracker, mock_store, mock_send_message
+    ) -> None:
+        """The result-request keyboard callback_data contains the prediction_id."""
+        now = datetime.now(timezone.utc)
+        prediction_id = uuid4()
+        mock_store.get_pending.return_value = [
+            {
+                "id": prediction_id,
+                "telegram_id": 123,
+                "symbol": "EURUSD_otc",
+                "timeframe_sec": 60,
+                "direction": "call",
+                "confidence": 0.78,
+                "reasoning": "test",
+                "indicators": {},
+                "entry_price": 1.0850,
+                "entry_time": now - timedelta(seconds=60),
+                "expiry_time": now - timedelta(seconds=RESOLVE_GRACE_SECONDS + 5),
+            }
+        ]
+
+        await tracker._check_pending()
+
+        call_args = mock_send_message.call_args
+        reply_markup = call_args[1]["reply_markup"]
+        # Check that callback_data contains the prediction_id
+        for btn_row in reply_markup.inline_keyboard:
+            for btn in btn_row:
+                assert str(prediction_id) in btn.callback_data

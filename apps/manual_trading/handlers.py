@@ -19,15 +19,12 @@ _SIGNAL_IMAGES = {
 }
 
 from apps.manual_trading.constants import (
-    POPULAR_PAIRS,
-    CANDLES_NEEDED,
     min_candles_for_timeframe,
 )
 from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.keyboards import (
     pair_selection_keyboard,
     duration_selection_keyboard,
-    result_feedback_keyboard,
     trade_mode_keyboard,
 )
 from apps.manual_trading.market_data import MarketDataCollector
@@ -519,7 +516,6 @@ async def _store_training_data(
 ) -> None:
     """Store training data for future model improvement."""
     try:
-        from uuid import uuid4
         from apps.manual_trading.database import TrainingDataStore
 
         store: TrainingDataStore = context.bot_data.get("training_data_store")
