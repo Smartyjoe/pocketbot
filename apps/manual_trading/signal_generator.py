@@ -1,20 +1,36 @@
-"""Rule-based signal generation — trend-following confluence pipeline.
+"""Rule-based signal generation — always-signal directional confidence scoring.
 
-Stages:
-1. TREND DETECTION — EMA cross dead zone + MACD confirmation
-2. MOMENTUM GATE — MACD histogram + ROC must agree with trend
-3. ENTRY TIMING — RSI zone, Stochastic cross, Bollinger position
-4. VOLATILITY FILTER — ATR spike rejection
-5. CONFIDENCE SCORING — base + bonuses, clamped, gated by MIN_CONFIDENCE
+Strategy:
+  Always produce a signal with has_signal=True (except insufficient data).
+  Confidence reflects how strongly indicators agree on the direction.
+
+Direction detection:
+  - Primary: EMA 10/30 cross sign determines call/put.
+  - ROC breaks ties when EMA cross is negligible (mild trend).
+  - Falls back to "call" if both EMA cross and ROC are NaN.
+
+Confidence scoring (base 0.50):
+  +0.05  Strong EMA trend (|cross| > 0.2% of close)
+  +0.02  Mild EMA trend (|cross| > 0.05% of close)
+  +0.08  ROC agrees with direction
+  +0.05  MACD histogram agrees with direction
+  +0.05  RSI favorable zone (oversold in downtrend / overbought in uptrend)
+  +0.03  RSI entry zone (RSI dip buy / sell zone)
+  +0.03  Stochastic crossover confirms direction
+  +0.03  Bollinger position confirms direction
+  -0.10  ATR spike (extreme volatility penalty)
+
+Final confidence clamped to [0.35, 0.90].
+has_signal=True always (safety fallback only).
 
 Indicators reused from TechnicalIndicators:
 - EMA 10/30 cross (trend direction)
-- MACD (12/26/9) histogram (trend confirmation + momentum)
-- RSI (14) — entry timing zone
+- MACD (12/26/9) histogram (trend confirmation)
+- RSI (14) — favorability + entry timing
 - Stochastic (14/3) — crossover confirmation
-- Bollinger %b (20/2) — edge confirmation
-- ROC (5-bar) — momentum agreement
-- ATR (14) — volatility filter
+- Bollinger %b (20/2) — position confirmation
+- ROC (5-bar) — momentum direction
+- ATR (14) — volatility penalty
 """
 from __future__ import annotations
 
@@ -24,12 +40,10 @@ import numpy as np
 import pandas as pd
 
 from apps.manual_trading.constants import (
-    MIN_CONFIDENCE,
-    TREND_DEAD_ZONE,
-    RSI_ENTRY_LOW,
-    RSI_ENTRY_HIGH,
-    RSI_ENTRY_LOW_DOWN,
-    RSI_ENTRY_HIGH_DOWN,
+    TREND_STRONG_THRESHOLD,
+    TREND_MILD_THRESHOLD,
+    RSI_FAVORABLE_LOW,
+    RSI_FAVORABLE_HIGH,
     ATR_SPIKE_MULTIPLIER,
     ATR_SMA_WINDOW,
 )
@@ -41,11 +55,10 @@ MIN_CANDLES = 16
 
 
 def generate_signal(df_with_indicators: pd.DataFrame) -> Signal:
-    """Generate a trading signal from a DataFrame that already has indicators.
+    """Generate a directional signal with confidence from indicator confluence.
 
-    Pipeline: trend → momentum → entry timing → volatility → confidence.
-    Returns a Signal with has_signal=True only when all gates pass and
-    confidence >= MIN_CONFIDENCE.
+    Always returns has_signal=True when data is sufficient.
+    Confidence reflects the strength of indicator agreement on direction.
 
     Args:
         df_with_indicators: DataFrame with columns from TechnicalIndicators.compute()
@@ -67,202 +80,141 @@ def generate_signal(df_with_indicators: pd.DataFrame) -> Signal:
 
     indicator_snapshot = _build_indicator_snapshot(last)
 
-    # --- Stage 1: Trend Detection ---
-    trend, trend_reasons = _detect_trend(last, prev)
-    if trend is None:
+    # --- Direction detection ---
+    direction = _detect_direction(last)
+    if direction is None:
         return Signal(
             has_signal=False,
             direction="call",
             confidence=0.0,
-            reasoning=trend_reasons,
+            reasoning=["Unable to determine direction — insufficient indicator data"],
             indicators=indicator_snapshot,
         )
 
-    # --- Stage 2: Momentum Gate ---
-    momentum_ok, momentum_reasons = _check_momentum(last, prev, trend)
-    if not momentum_ok:
-        return Signal(
-            has_signal=False,
-            direction="call",
-            confidence=0.0,
-            reasoning=trend_reasons + momentum_reasons,
-            indicators=indicator_snapshot,
-        )
+    # --- Confidence scoring ---
+    base = 0.50
+    bonuses, scoring_reasons = _score_confidence(last, prev, df_with_indicators, direction)
 
-    # --- Stage 3: Entry Timing ---
-    entry_score, entry_reasons = _score_entry_timing(last, prev, trend)
+    confidence = base + bonuses
+    confidence = max(0.35, min(0.90, confidence))
+    confidence = round(confidence, 2)
 
-    # --- Stage 4: Volatility Filter ---
-    volatility_ok, volatility_reasons = _check_volatility(last, df_with_indicators)
-    if not volatility_ok:
-        return Signal(
-            has_signal=False,
-            direction="call",
-            confidence=0.0,
-            reasoning=trend_reasons + momentum_reasons + entry_reasons + volatility_reasons,
-            indicators=indicator_snapshot,
-        )
-
-    # --- Stage 5: Confidence Scoring ---
-    base = 0.65
-    confidence = _compute_confidence(base, [entry_score])
-
-    direction = "call" if trend == "up" else "put"
-    all_reasons = trend_reasons + momentum_reasons + entry_reasons
-
-    if confidence < MIN_CONFIDENCE:
-        return Signal(
-            has_signal=False,
-            direction=direction,
-            confidence=0.0,
-            reasoning=all_reasons + [f"Confluence below minimum confidence ({confidence:.0%} < {MIN_CONFIDENCE:.0%})"],
-            indicators=indicator_snapshot,
-        )
-
-    # Clamp to [MIN_CONFIDENCE, 0.95]
-    confidence = max(MIN_CONFIDENCE, min(0.95, confidence))
-
-    # Prepend summary
-    summary = (
-        f"{'Bullish' if direction == 'call' else 'Bearish'} "
-        f"trend confluence — {confidence:.0%} confidence"
-    )
-    all_reasons.insert(0, summary)
+    # Build reasoning
+    direction_label = "Uptrend" if direction == "call" else "Downtrend"
+    summary = f"{direction_label} signal — {confidence:.0%} confidence"
+    all_reasons = [summary] + scoring_reasons
 
     return Signal(
         has_signal=True,
         direction=direction,
-        confidence=round(confidence, 2),
+        confidence=confidence,
         reasoning=all_reasons[:5],
         indicators=indicator_snapshot,
     )
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: Trend Detection
+# Direction Detection
 # ---------------------------------------------------------------------------
 
-def _detect_trend(last: pd.Series, prev: pd.Series) -> tuple[str | None, list[str]]:
-    """Detect trend direction using EMA cross dead zone + MACD confirmation.
+def _detect_direction(last: pd.Series) -> str | None:
+    """Determine trade direction using EMA cross sign and ROC tiebreaker.
 
     Returns:
-        (direction, reasoning) where direction is 'up', 'down', or None.
+        'call' (up), 'put' (down), or None if both EMA and ROC are NaN.
     """
     ema_cross = _safe(last, "ema_cross")
-    macd_hist = _safe(last, "macd_hist")
-    reasoning: list[str] = []
-
-    if np.isnan(ema_cross):
-        return None, ["EMA cross data unavailable"]
-
-    # Dead zone check
-    if abs(ema_cross) <= TREND_DEAD_ZONE:
-        return None, [
-            f"No clear trend — EMA cross within dead zone "
-            f"(|{ema_cross:.6f}| <= {TREND_DEAD_ZONE})"
-        ]
-
-    # EMA cross indicates direction
-    ema_direction = "up" if ema_cross > 0 else "down"
-
-    # Confirm with MACD histogram (directional only — not precise at this candle count)
-    if not np.isnan(macd_hist):
-        macd_direction = "up" if macd_hist > 0 else "down"
-        if macd_direction != ema_direction:
-            return None, [
-                f"EMA and MACD disagree — EMA cross {'above' if ema_direction == 'up' else 'below'} dead zone "
-                f"but MACD histogram {'positive' if macd_direction == 'up' else 'negative'}"
-            ]
-        reasoning.append(
-            f"{'Uptrend' if ema_direction == 'up' else 'Downtrend'} "
-            f"(EMA 10 {'>' if ema_direction == 'up' else '<'} EMA 30, MACD confirmed)"
-        )
-    else:
-        reasoning.append(
-            f"{'Uptrend' if ema_direction == 'up' else 'Downtrend'} "
-            f"(EMA cross {ema_cross:.6f}, MACD unavailable)"
-        )
-
-    return ema_direction, reasoning
-
-
-# ---------------------------------------------------------------------------
-# Stage 2: Momentum Gate
-# ---------------------------------------------------------------------------
-
-def _check_momentum(
-    last: pd.Series, prev: pd.Series, trend: str
-) -> tuple[bool, list[str]]:
-    """Verify MACD histogram and ROC agree with trend direction.
-
-    Both must agree. Either disagreeing = no signal.
-    """
-    reasoning: list[str] = []
-
-    macd_hist = _safe(last, "macd_hist")
     roc = _safe(last, "roc_5")
 
-    # MACD histogram direction
-    if not np.isnan(macd_hist):
-        macd_agrees = (macd_hist > 0) == (trend == "up")
-        if not macd_agrees:
-            return False, [
-                f"Momentum disagrees — MACD histogram {'positive' if macd_hist > 0 else 'negative'} "
-                f"in {'downtrend' if trend == 'down' else 'uptrend'}"
-            ]
-        reasoning.append(
-            f"MACD momentum {'confirmed' if macd_agrees else 'pending'} "
-            f"(histogram {macd_hist:.6f})"
-        )
+    # EMA cross sign determines direction
+    if not np.isnan(ema_cross):
+        if abs(ema_cross) > TREND_MILD_THRESHOLD:
+            return "call" if ema_cross > 0 else "put"
 
-    # ROC direction
+    # EMA cross is NaN or too small — use ROC as tiebreaker
     if not np.isnan(roc):
-        roc_agrees = (roc > 0) == (trend == "up")
-        if not roc_agrees:
-            return False, [
-                f"Momentum disagrees — ROC {roc:.4%} "
-                f"{'rising' if roc > 0 else 'falling'} in "
-                f"{'downtrend' if trend == 'down' else 'uptrend'}"
-            ]
-        reasoning.append(f"ROC momentum confirmed ({roc:.4%} over 5 bars)")
+        return "call" if roc > 0 else "put"
 
-    # If both are NaN, we can't reject on momentum — let it pass
-    return True, reasoning
+    # Both NaN — cannot determine direction
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Stage 3: Entry Timing
+# Confidence Scoring
 # ---------------------------------------------------------------------------
 
-def _score_entry_timing(
-    last: pd.Series, prev: pd.Series, trend: str
+def _score_confidence(
+    last: pd.Series, prev: pd.Series, df: pd.DataFrame, direction: str
 ) -> tuple[float, list[str]]:
-    """Score entry timing bonuses from RSI, Stochastic, and Bollinger.
+    """Score confidence from indicator agreement with the determined direction.
 
-    Returns (bonus_score, reasoning). Bonus ranges from 0.0 to 0.20.
+    Returns:
+        (total_bonus, reasoning_list). Bonus ranges roughly -0.10 to +0.29.
     """
-    bonus = 0.0
+    total_bonus = 0.0
     reasoning: list[str] = []
+    is_up = direction == "call"
 
-    # --- RSI entry zone ---
+    # --- EMA trend strength bonus ---
+    ema_cross = _safe(last, "ema_cross")
+    close = _safe(last, "close")
+    if not np.isnan(ema_cross) and not np.isnan(close) and close > 0:
+        normalized = abs(ema_cross) / close
+        if normalized > TREND_STRONG_THRESHOLD:
+            total_bonus += 0.05
+            reasoning.append(
+                f"Strong EMA trend (cross {ema_cross:.6f}, {normalized:.4%} of price)"
+            )
+        elif normalized > TREND_MILD_THRESHOLD:
+            total_bonus += 0.02
+            reasoning.append(
+                f"Mild EMA trend (cross {ema_cross:.6f}, {normalized:.4%} of price)"
+            )
+
+    # --- ROC direction bonus ---
+    roc = _safe(last, "roc_5")
+    if not np.isnan(roc):
+        roc_agrees = (roc > 0) == is_up
+        if roc_agrees:
+            total_bonus += 0.08
+            reasoning.append(f"ROC confirms {direction} ({roc:+.4%})")
+        else:
+            reasoning.append(f"ROC diverges ({roc:+.4%})")
+
+    # --- MACD histogram bonus ---
+    macd_hist = _safe(last, "macd_hist")
+    if not np.isnan(macd_hist):
+        macd_agrees = (macd_hist > 0) == is_up
+        if macd_agrees:
+            total_bonus += 0.05
+            reasoning.append(f"MACD histogram confirms {direction}")
+        else:
+            reasoning.append(f"MACD histogram diverges")
+
+    # --- RSI favorability bonus ---
     rsi = _safe(last, "rsi")
     if not np.isnan(rsi):
-        if trend == "up" and RSI_ENTRY_LOW <= rsi <= RSI_ENTRY_HIGH:
-            bonus += 0.10
+        # Favorable zone: oversold in downtrend, overbought in uptrend
+        rsi_favorable = (
+            (is_up and rsi < RSI_FAVORABLE_LOW)
+            or (not is_up and rsi > RSI_FAVORABLE_HIGH)
+        )
+        if rsi_favorable:
+            total_bonus += 0.05
             reasoning.append(
-                f"RSI dip buy — RSI {rsi:.0f} in entry zone "
-                f"({RSI_ENTRY_LOW:.0f}-{RSI_ENTRY_HIGH:.0f}) within uptrend"
+                f"RSI {rsi:.0f} favorable for {direction} "
+                f"({'oversold' if is_up else 'overbought'} zone)"
             )
-        elif trend == "down" and RSI_ENTRY_LOW_DOWN <= rsi <= RSI_ENTRY_HIGH_DOWN:
-            bonus += 0.10
-            reasoning.append(
-                f"RSI sell zone — RSI {rsi:.0f} in entry zone "
-                f"({RSI_ENTRY_LOW_DOWN:.0f}-{RSI_ENTRY_HIGH_DOWN:.0f}) within downtrend"
-            )
-        else:
-            reasoning.append(f"RSI {rsi:.0f} — outside entry timing zone")
+        # Entry zone bonus (separate from favorability)
+        entry_zone = (
+            (is_up and 30 <= rsi <= 50)
+            or (not is_up and 50 <= rsi <= 70)
+        )
+        if entry_zone:
+            total_bonus += 0.03
+            reasoning.append(f"RSI {rsi:.0f} in entry zone")
 
-    # --- Stochastic crossover in trend direction ---
+    # --- Stochastic crossover bonus ---
     stoch_k = _safe(last, "stoch_k")
     stoch_d = _safe(last, "stoch_d")
     prev_stoch_k = _safe(prev, "stoch_k")
@@ -270,83 +222,61 @@ def _score_entry_timing(
     if not any(np.isnan(x) for x in [stoch_k, stoch_d, prev_stoch_k, prev_stoch_d]):
         bullish_cross = stoch_k > stoch_d and prev_stoch_k <= prev_stoch_d
         bearish_cross = stoch_k < stoch_d and prev_stoch_k >= prev_stoch_d
-
-        if (trend == "up" and bullish_cross) or (trend == "down" and bearish_cross):
-            bonus += 0.05
+        if (is_up and bullish_cross) or (not is_up and bearish_cross):
+            total_bonus += 0.03
             reasoning.append(
-                f"Stochastic {'bullish' if trend == 'up' else 'bearish'} crossover "
-                f"confirmed (K={stoch_k:.0f}, D={stoch_d:.0f})"
-            )
-        else:
-            reasoning.append(
-                f"Stochastic K={stoch_k:.0f} — no crossover confirmation"
+                f"Stochastic {'bullish' if is_up else 'bearish'} crossover "
+                f"(K={stoch_k:.0f}, D={stoch_d:.0f})"
             )
 
-    # --- Bollinger Band position in trend direction ---
+    # --- Bollinger position bonus ---
     bb_pct = _safe(last, "bb_pct")
     if not np.isnan(bb_pct):
-        if trend == "up" and bb_pct < 0.3:
-            bonus += 0.05
-            reasoning.append(
-                f"Price near lower Bollinger band ({bb_pct:.2f}) — bounce zone in uptrend"
-            )
-        elif trend == "down" and bb_pct > 0.7:
-            bonus += 0.05
-            reasoning.append(
-                f"Price near upper Bollinger band ({bb_pct:.2f}) — pullback zone in downtrend"
-            )
-        else:
-            reasoning.append(f"Bollinger %b {bb_pct:.2f} — not at trend edge")
+        bb_confirms = (is_up and bb_pct < 0.3) or (not is_up and bb_pct > 0.7)
+        if bb_confirms:
+            total_bonus += 0.03
+            band = "lower" if is_up else "upper"
+            reasoning.append(f"Price near {band} Bollinger band ({bb_pct:.2f})")
 
-    return bonus, reasoning
+    # --- ATR volatility penalty ---
+    atr_penalty, atr_reason = _score_volatility_penalty(last, df)
+    total_bonus += atr_penalty
+    if atr_reason:
+        reasoning.append(atr_reason)
+
+    return total_bonus, reasoning
 
 
-# ---------------------------------------------------------------------------
-# Stage 4: Volatility Filter
-# ---------------------------------------------------------------------------
-
-def _check_volatility(
+def _score_volatility_penalty(
     last: pd.Series, df: pd.DataFrame
-) -> tuple[bool, list[str]]:
-    """Reject signals when ATR% spikes above its SMA — extreme volatility.
+) -> tuple[float, str | None]:
+    """Return ATR volatility penalty and optional reason string.
 
-    Uses the longest feasible SMA window given available candle count.
+    Penalizes confidence when ATR% spikes above its SMA — extreme volatility.
     """
     atr_pct = _safe(last, "atr_pct")
     if np.isnan(atr_pct):
-        # ATR not available — cannot filter, let it pass
-        return True, []
+        return 0.0, None
 
-    # Compute SMA of ATR% over available window
     window = min(ATR_SMA_WINDOW, len(df))
     if window < 3:
-        return True, []
+        return 0.0, None
 
     atr_pct_series = df["atr_pct"].dropna()
     if len(atr_pct_series) < window:
-        return True, []
+        return 0.0, None
 
     atr_sma = atr_pct_series.iloc[-window:].mean()
     if np.isnan(atr_sma) or atr_sma == 0:
-        return True, []
+        return 0.0, None
 
     if atr_pct > ATR_SPIKE_MULTIPLIER * atr_sma:
-        return False, [
-            f"ATR spike — volatility too high "
+        return -0.10, (
+            f"ATR spike — high volatility "
             f"(ATR% {atr_pct:.4f} > {ATR_SPIKE_MULTIPLIER}x SMA {atr_sma:.4f})"
-        ]
+        )
 
-    return True, []
-
-
-# ---------------------------------------------------------------------------
-# Stage 5: Confidence Scoring
-# ---------------------------------------------------------------------------
-
-def _compute_confidence(base: float, bonuses: list[float]) -> float:
-    """Sum base + bonuses, clamp to [0.0, 0.95]."""
-    total = base + sum(bonuses)
-    return max(0.0, min(0.95, total))
+    return 0.0, None
 
 
 # ---------------------------------------------------------------------------

@@ -1,20 +1,21 @@
-"""Tests for the trend-following confluence signal generator."""
+"""Tests for the always-signal directional confidence signal generator."""
 import numpy as np
 import pandas as pd
 import pytest
 
 from apps.manual_trading.signal_generator import (
     generate_signal,
-    _detect_trend,
-    _check_momentum,
-    _score_entry_timing,
-    _check_volatility,
-    _compute_confidence,
+    _detect_direction,
+    _score_confidence,
+    _score_volatility_penalty,
+    _build_indicator_snapshot,
     MIN_CANDLES,
 )
 from apps.manual_trading.constants import (
-    MIN_CONFIDENCE,
-    TREND_DEAD_ZONE,
+    TREND_STRONG_THRESHOLD,
+    TREND_MILD_THRESHOLD,
+    RSI_FAVORABLE_LOW,
+    RSI_FAVORABLE_HIGH,
     ATR_SPIKE_MULTIPLIER,
     COOLDOWN_BARS,
 )
@@ -64,6 +65,16 @@ def _make_row(**overrides) -> pd.Series:
     return pd.Series(defaults)
 
 
+def _make_prev(**overrides) -> pd.Series:
+    """Build a previous-bar pd.Series for stochastic crossover tests."""
+    defaults = {
+        "stoch_k": float("nan"),
+        "stoch_d": float("nan"),
+    }
+    defaults.update(overrides)
+    return pd.Series(defaults)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -72,221 +83,244 @@ class TestConstants:
     def test_min_candles(self) -> None:
         assert MIN_CANDLES == 16
 
-    def test_min_confidence(self) -> None:
-        assert MIN_CONFIDENCE == 0.70
-
     def test_cooldown_bars(self) -> None:
         assert COOLDOWN_BARS == 3
 
+    def test_trend_thresholds(self) -> None:
+        assert TREND_STRONG_THRESHOLD > TREND_MILD_THRESHOLD > 0
 
-# ---------------------------------------------------------------------------
-# Stage 1: Trend Detection
-# ---------------------------------------------------------------------------
+    def test_rsi_boundaries(self) -> None:
+        assert RSI_FAVORABLE_LOW < RSI_FAVORABLE_HIGH
 
-class TestDetectTrend:
-    def test_uptrend_ema_above_dead_zone(self) -> None:
-        last = _make_row(ema_cross=0.005, macd_hist=0.0005)
-        prev = _make_row(ema_cross=0.004, macd_hist=0.0003)
-        direction, reasons = _detect_trend(last, prev)
-        assert direction == "up"
-        assert any("Uptrend" in r for r in reasons)
-
-    def test_downtrend_ema_below_dead_zone(self) -> None:
-        last = _make_row(ema_cross=-0.005, macd_hist=-0.0005)
-        prev = _make_row(ema_cross=-0.004, macd_hist=-0.0003)
-        direction, reasons = _detect_trend(last, prev)
-        assert direction == "down"
-        assert any("Downtrend" in r for r in reasons)
-
-    def test_dead_zone_rejects(self) -> None:
-        last = _make_row(ema_cross=0.00005, macd_hist=0.0001)
-        prev = _make_row(ema_cross=0.00004)
-        direction, reasons = _detect_trend(last, prev)
-        assert direction is None
-        assert any("dead zone" in r for r in reasons)
-
-    def test_ema_macd_disagreement_rejects(self) -> None:
-        last = _make_row(ema_cross=0.005, macd_hist=-0.0005)
-        prev = _make_row(ema_cross=0.004, macd_hist=-0.0003)
-        direction, reasons = _detect_trend(last, prev)
-        assert direction is None
-        assert any("disagree" in r for r in reasons)
-
-    def test_ema_nan_returns_none(self) -> None:
-        last = _make_row(ema_cross=float("nan"))
-        prev = _make_row()
-        direction, reasons = _detect_trend(last, prev)
-        assert direction is None
-        assert any("unavailable" in r for r in reasons)
-
-    def test_macd_nan_with_valid_ema_passes(self) -> None:
-        """When MACD is NaN, only EMA direction matters."""
-        last = _make_row(ema_cross=0.005, macd_hist=float("nan"))
-        prev = _make_row(ema_cross=0.004)
-        direction, reasons = _detect_trend(last, prev)
-        assert direction == "up"
-        assert any("MACD unavailable" in r for r in reasons)
+    def test_atr_spike_multiplier_gt_one(self) -> None:
+        assert ATR_SPIKE_MULTIPLIER > 1.0
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: Momentum Gate
+# Direction Detection
 # ---------------------------------------------------------------------------
 
-class TestMomentumGate:
-    def test_macd_agrees_with_uptrend(self) -> None:
-        last = _make_row(macd_hist=0.001, roc_5=0.0005)
-        prev = _make_row()
-        ok, reasons = _check_momentum(last, prev, "up")
-        assert ok is True
-        assert any("MACD momentum" in r for r in reasons)
+class TestDetectDirection:
+    def test_strong_ema_cross_returns_call(self) -> None:
+        last = _make_row(ema_cross=0.005, close=1.0850)
+        assert _detect_direction(last) == "call"
 
-    def test_macd_disagrees_rejects(self) -> None:
-        last = _make_row(macd_hist=-0.001, roc_5=0.0005)
-        prev = _make_row()
-        ok, reasons = _check_momentum(last, prev, "up")
-        assert ok is False
-        assert any("disagrees" in r for r in reasons)
+    def test_strong_negative_ema_cross_returns_put(self) -> None:
+        last = _make_row(ema_cross=-0.005, close=1.0850)
+        assert _detect_direction(last) == "put"
 
-    def test_roc_disagrees_rejects(self) -> None:
-        last = _make_row(macd_hist=0.001, roc_5=-0.005)
-        prev = _make_row()
-        ok, reasons = _check_momentum(last, prev, "up")
-        assert ok is False
-        assert any("ROC" in r for r in reasons)
+    def test_mild_ema_cross_returns_direction(self) -> None:
+        """Even a mild EMA cross above TREND_MILD_THRESHOLD is enough."""
+        last = _make_row(ema_cross=0.001, close=1.0850)
+        assert _detect_direction(last) == "call"
 
-    def test_both_nan_passes(self) -> None:
-        last = _make_row(macd_hist=float("nan"), roc_5=float("nan"))
-        prev = _make_row()
-        ok, reasons = _check_momentum(last, prev, "up")
-        assert ok is True
-        assert len(reasons) == 0
+    def test_tiny_ema_cross_uses_roc_tiebreaker(self) -> None:
+        """EMA cross below TREND_MILD_THRESHOLD falls back to ROC."""
+        last = _make_row(ema_cross=0.00001, roc_5=0.003, close=1.0850)
+        assert _detect_direction(last) == "call"
 
-    def test_downtrend_macd_negative_agrees(self) -> None:
-        last = _make_row(macd_hist=-0.001, roc_5=-0.005)
-        prev = _make_row()
-        ok, reasons = _check_momentum(last, prev, "down")
-        assert ok is True
+    def test_tiny_negative_ema_cross_uses_roc_put(self) -> None:
+        last = _make_row(ema_cross=-0.00001, roc_5=-0.003, close=1.0850)
+        assert _detect_direction(last) == "put"
 
+    def test_nan_ema_uses_roc(self) -> None:
+        last = _make_row(ema_cross=float("nan"), roc_5=0.002)
+        assert _detect_direction(last) == "call"
 
-# ---------------------------------------------------------------------------
-# Stage 3: Entry Timing
-# ---------------------------------------------------------------------------
+    def test_nan_ema_negative_roc_returns_put(self) -> None:
+        last = _make_row(ema_cross=float("nan"), roc_5=-0.002)
+        assert _detect_direction(last) == "put"
 
-class TestEntryTiming:
-    def test_rsi_dip_buy_in_uptrend(self) -> None:
-        last = _make_row(rsi=45, stoch_k=float("nan"), stoch_d=float("nan"),
-                         prev_stoch_k=float("nan"), bb_pct=float("nan"))
-        prev = _make_row(stoch_k=float("nan"), stoch_d=float("nan"))
-        bonus, reasons = _score_entry_timing(last, prev, "up")
-        assert bonus >= 0.10
-        assert any("RSI dip buy" in r for r in reasons)
+    def test_both_nan_returns_none(self) -> None:
+        last = _make_row(ema_cross=float("nan"), roc_5=float("nan"))
+        assert _detect_direction(last) is None
 
-    def test_rsi_sell_zone_in_downtrend(self) -> None:
-        last = _make_row(rsi=55, stoch_k=float("nan"), stoch_d=float("nan"),
-                         bb_pct=float("nan"))
-        prev = _make_row(stoch_k=float("nan"), stoch_d=float("nan"))
-        bonus, reasons = _score_entry_timing(last, prev, "down")
-        assert bonus >= 0.10
-        assert any("RSI sell zone" in r for r in reasons)
-
-    def test_rsi_outside_zone_no_bonus(self) -> None:
-        last = _make_row(rsi=70, stoch_k=float("nan"), stoch_d=float("nan"),
-                         bb_pct=float("nan"))
-        prev = _make_row(stoch_k=float("nan"), stoch_d=float("nan"))
-        bonus, reasons = _score_entry_timing(last, prev, "up")
-        assert bonus == 0.0
-        assert any("outside entry" in r for r in reasons)
-
-    def test_stoch_bullish_cross_in_uptrend(self) -> None:
-        last = _make_row(rsi=float("nan"), stoch_k=60, stoch_d=50, bb_pct=float("nan"))
-        prev = _make_row(stoch_k=45, stoch_d=50)
-        bonus, reasons = _score_entry_timing(last, prev, "up")
-        assert bonus >= 0.05
-        assert any("bullish" in r.lower() and "crossover" in r for r in reasons)
-
-    def test_stoch_bearish_cross_in_downtrend(self) -> None:
-        last = _make_row(rsi=float("nan"), stoch_k=40, stoch_d=50, bb_pct=float("nan"))
-        prev = _make_row(stoch_k=55, stoch_d=50)
-        bonus, reasons = _score_entry_timing(last, prev, "down")
-        assert bonus >= 0.05
-        assert any("bearish" in r.lower() and "crossover" in r for r in reasons)
-
-    def test_bb_lower_band_in_uptrend(self) -> None:
-        last = _make_row(rsi=float("nan"), stoch_k=float("nan"), stoch_d=float("nan"),
-                         bb_pct=0.2)
-        prev = _make_row(stoch_k=float("nan"), stoch_d=float("nan"))
-        bonus, reasons = _score_entry_timing(last, prev, "up")
-        assert bonus >= 0.05
-        assert any("lower Bollinger" in r for r in reasons)
-
-    def test_bb_upper_band_in_downtrend(self) -> None:
-        last = _make_row(rsi=float("nan"), stoch_k=float("nan"), stoch_d=float("nan"),
-                         bb_pct=0.8)
-        prev = _make_row(stoch_k=float("nan"), stoch_d=float("nan"))
-        bonus, reasons = _score_entry_timing(last, prev, "down")
-        assert bonus >= 0.05
-        assert any("upper Bollinger" in r for r in reasons)
-
-    def test_max_bonus_cap(self) -> None:
-        """All three bonuses combined = 0.20."""
-        last = _make_row(rsi=45, stoch_k=60, stoch_d=50, bb_pct=0.2)
-        prev = _make_row(stoch_k=45, stoch_d=50)
-        bonus, _ = _score_entry_timing(last, prev, "up")
-        assert bonus == pytest.approx(0.20)
+    def test_zero_ema_zero_roc_returns_put(self) -> None:
+        """EMA cross = 0 is below TREND_MILD_THRESHOLD, ROC = 0 is not > 0, returns put."""
+        last = _make_row(ema_cross=0.0, roc_5=0.0, close=1.0850)
+        assert _detect_direction(last) == "put"
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: Volatility Filter
-# ---------------------------------------------------------------------------
-
-class TestVolatilityFilter:
-    def test_spike_rejects(self) -> None:
-        """When ATR% is much larger than its SMA, signal is rejected."""
-        df = _make_indicators_df(30)
-        # Force a spike in the last row
-        atr_pct_values = np.full(30, 0.01)
-        atr_pct_values[-1] = 0.05  # 5x the normal
-        df["atr_pct"] = atr_pct_values
-        last = df.iloc[-1]
-        ok, reasons = _check_volatility(last, df)
-        assert ok is False
-        assert any("ATR spike" in r for r in reasons)
-
-    def test_normal_passes(self) -> None:
-        df = _make_indicators_df(30)
-        df["atr_pct"] = np.full(30, 0.01)
-        last = df.iloc[-1]
-        ok, reasons = _check_volatility(last, df)
-        assert ok is True
-
-    def test_nan_atr_passes(self) -> None:
-        df = _make_indicators_df(30)
-        df["atr_pct"] = float("nan")
-        last = df.iloc[-1]
-        ok, reasons = _check_volatility(last, df)
-        assert ok is True
-
-
-# ---------------------------------------------------------------------------
-# Stage 5: Confidence Scoring
+# Confidence Scoring
 # ---------------------------------------------------------------------------
 
 class TestConfidenceScoring:
-    def test_base_only(self) -> None:
-        conf = _compute_confidence(0.65, [])
-        assert conf == pytest.approx(0.65)
+    def test_base_only_with_all_nan(self) -> None:
+        """All indicators NaN = base confidence 0.50, no bonuses."""
+        last = _make_row(close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus == pytest.approx(0.0)
 
-    def test_base_plus_bonus(self) -> None:
-        conf = _compute_confidence(0.65, [0.10, 0.05])
-        assert conf == pytest.approx(0.80)
+    def test_roc_agrees_adds_bonus(self) -> None:
+        last = _make_row(roc_5=0.005, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.08
+        assert any("ROC confirms" in r for r in reasons)
 
-    def test_clamped_at_095(self) -> None:
-        conf = _compute_confidence(0.90, [0.10])
-        assert conf == pytest.approx(0.95)
+    def test_roc_diverges_no_penalty(self) -> None:
+        """ROC disagreement just doesn't add the bonus — no negative penalty."""
+        last = _make_row(roc_5=-0.005, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.0
+        assert any("ROC diverges" in r for r in reasons)
 
-    def test_clamped_at_0(self) -> None:
-        conf = _compute_confidence(-0.10, [])
-        assert conf == pytest.approx(0.0)
+    def test_macd_agrees_adds_bonus(self) -> None:
+        last = _make_row(macd_hist=0.001, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.05
+        assert any("MACD histogram confirms" in r for r in reasons)
+
+    def test_macd_diverges_no_penalty(self) -> None:
+        last = _make_row(macd_hist=-0.001, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert any("MACD histogram diverges" in r for r in reasons)
+
+    def test_rsi_favorable_in_downtrend(self) -> None:
+        """RSI above RSI_FAVORABLE_HIGH in downtrend = favorable (overbought)."""
+        last = _make_row(rsi=70.0, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "put")
+        assert bonus >= 0.05
+        assert any("favorable" in r.lower() for r in reasons)
+
+    def test_rsi_favorable_in_uptrend(self) -> None:
+        """RSI below RSI_FAVORABLE_LOW in uptrend = favorable (oversold)."""
+        last = _make_row(rsi=30.0, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.05
+        assert any("favorable" in r.lower() for r in reasons)
+
+    def test_rsi_entry_zone_uptrend(self) -> None:
+        """RSI 40 in uptrend is in entry zone (30-50)."""
+        last = _make_row(rsi=40.0, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert any("entry zone" in r.lower() for r in reasons)
+
+    def test_rsi_entry_zone_downtrend(self) -> None:
+        """RSI 60 in downtrend is in entry zone (50-70)."""
+        last = _make_row(rsi=60.0, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "put")
+        assert any("entry zone" in r.lower() for r in reasons)
+
+    def test_stoch_bullish_cross_in_uptrend(self) -> None:
+        last = _make_row(stoch_k=60, stoch_d=50, close=1.0850)
+        prev = _make_prev(stoch_k=45, stoch_d=50)
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.03
+        assert any("bullish" in r.lower() and "crossover" in r for r in reasons)
+
+    def test_stoch_bearish_cross_in_downtrend(self) -> None:
+        last = _make_row(stoch_k=40, stoch_d=50, close=1.0850)
+        prev = _make_prev(stoch_k=55, stoch_d=50)
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "put")
+        assert bonus >= 0.03
+        assert any("bearish" in r.lower() and "crossover" in r for r in reasons)
+
+    def test_bb_lower_in_uptrend(self) -> None:
+        last = _make_row(bb_pct=0.2, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.03
+        assert any("lower Bollinger" in r for r in reasons)
+
+    def test_bb_upper_in_downtrend(self) -> None:
+        last = _make_row(bb_pct=0.8, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "put")
+        assert bonus >= 0.03
+        assert any("upper Bollinger" in r for r in reasons)
+
+    def test_strong_ema_trend_bonus(self) -> None:
+        last = _make_row(ema_cross=0.005, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.05
+        assert any("Strong EMA" in r for r in reasons)
+
+    def test_mild_ema_trend_bonus(self) -> None:
+        last = _make_row(ema_cross=0.0008, close=1.0850)
+        prev = _make_prev()
+        df = _make_indicators_df(30)
+        bonus, reasons = _score_confidence(last, prev, df, "call")
+        assert bonus >= 0.02
+        assert any("Mild EMA" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# Volatility Penalty
+# ---------------------------------------------------------------------------
+
+class TestVolatilityPenalty:
+    def test_spike_penalizes(self) -> None:
+        """When ATR% > multiplier * SMA, penalty = -0.10."""
+        df = _make_indicators_df(30)
+        df["atr_pct"] = np.full(30, 0.01)
+        df.loc[df.index[-1], "atr_pct"] = 0.05
+        last = df.iloc[-1]
+        penalty, reason = _score_volatility_penalty(last, df)
+        assert penalty == pytest.approx(-0.10)
+        assert "ATR spike" in reason
+
+    def test_normal_no_penalty(self) -> None:
+        df = _make_indicators_df(30)
+        df["atr_pct"] = np.full(30, 0.01)
+        last = df.iloc[-1]
+        penalty, reason = _score_volatility_penalty(last, df)
+        assert penalty == 0.0
+        assert reason is None
+
+    def test_nan_atr_no_penalty(self) -> None:
+        df = _make_indicators_df(30)
+        df["atr_pct"] = float("nan")
+        last = df.iloc[-1]
+        penalty, reason = _score_volatility_penalty(last, df)
+        assert penalty == 0.0
+        assert reason is None
+
+
+# ---------------------------------------------------------------------------
+# Indicator Snapshot
+# ---------------------------------------------------------------------------
+
+class TestIndicatorSnapshot:
+    def test_populates_key_fields(self) -> None:
+        last = _make_row(rsi=45.0, macd_hist=0.001, bb_pct=0.3, stoch_k=60.0,
+                         stoch_d=50.0, roc_5=0.002, atr_pct=0.01)
+        snapshot = _build_indicator_snapshot(last)
+        assert snapshot["rsi"] == 45.0
+        assert snapshot["macd_hist"] == 0.001
+        assert snapshot["bb_pct"] == 0.3
+        assert snapshot["stoch_k"] == 60.0
+        assert snapshot["roc_5"] == 0.002
+
+    def test_nan_values_become_none(self) -> None:
+        last = _make_row()
+        snapshot = _build_indicator_snapshot(last)
+        for key in ["rsi", "macd_hist", "bb_pct", "stoch_k", "stoch_d", "roc_5", "atr_pct"]:
+            assert snapshot[key] is None
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +342,17 @@ class TestGenerateSignal:
         assert signal.has_signal is False
         assert signal.confidence == 0.0
         assert "Insufficient data" in signal.reasoning[0]
+
+    def test_always_has_signal_with_sufficient_data(self) -> None:
+        """The key behavior change: with enough data, has_signal is always True."""
+        df = _make_indicators_df(100)
+        signal = generate_signal(df)
+        assert signal.has_signal is True
+
+    def test_confidence_in_valid_range(self) -> None:
+        df = _make_indicators_df(100)
+        signal = generate_signal(df)
+        assert 0.35 <= signal.confidence <= 0.90
 
     def test_indicators_snapshot_populated(self) -> None:
         df = _make_indicators_df(100)
@@ -337,53 +382,31 @@ class TestGenerateSignal:
         assert len(signal.reasoning) > 0
         assert "Insufficient data" not in signal.reasoning[0]
 
-    def test_no_signal_when_in_dead_zone(self) -> None:
-        """When EMA cross is in the dead zone, has_signal should be False."""
-        df = _make_indicators_df(100)
-        # Force EMA cross into the dead zone
-        df.loc[df.index[-1], "ema_cross"] = 0.0
-        df.loc[df.index[-2], "ema_cross"] = 0.0
+    def test_all_nan_indicators_returns_no_signal(self) -> None:
+        """When all indicators are NaN, direction cannot be determined."""
+        df = _make_indicators_df(30)
+        # Force all indicator columns to NaN
+        for col in ["ema_cross", "macd_hist", "rsi", "stoch_k", "stoch_d",
+                     "bb_pct", "roc_5", "atr_pct"]:
+            df[col] = float("nan")
         signal = generate_signal(df)
         assert signal.has_signal is False
+        assert "Unable to determine direction" in signal.reasoning[0]
 
-    def test_has_signal_true_only_when_all_gates_pass(self) -> None:
-        """Verify has_signal=False when momentum disagrees."""
+    def test_first_reasoning_is_summary(self) -> None:
+        """First reasoning bullet should be the summary line."""
         df = _make_indicators_df(100)
-        # Set EMA cross indicating uptrend
-        df.loc[df.index[-1], "ema_cross"] = 0.001
-        df.loc[df.index[-2], "ema_cross"] = 0.0008
-        # But MACD histogram disagrees
-        df.loc[df.index[-1], "macd_hist"] = -0.001
         signal = generate_signal(df)
-        assert signal.has_signal is False
+        assert signal.has_signal is True
+        assert "signal" in signal.reasoning[0].lower()
+        assert "confidence" in signal.reasoning[0].lower()
 
-    def test_confidence_gated_below_minimum(self) -> None:
-        """When all stages pass but confidence is below MIN_CONFIDENCE, has_signal=False."""
-        df = _make_indicators_df(100)
-        # Force a weak signal — EMA cross barely above dead zone
-        df.loc[df.index[-1], "ema_cross"] = 0.0002
-        df.loc[df.index[-2], "ema_cross"] = 0.00015
-        # MACD agrees weakly
-        df.loc[df.index[-1], "macd_hist"] = 0.0001
-        df.loc[df.index[-1], "roc_5"] = 0.0001
-        # RSI outside entry zone, no stochastic, no BB
-        df.loc[df.index[-1], "rsi"] = 65.0
-        df.loc[df.index[-1], "stoch_k"] = float("nan")
-        df.loc[df.index[-1], "stoch_d"] = float("nan")
-        df.loc[df.index[-1], "bb_pct"] = 0.5
-        signal = generate_signal(df)
-        # With base 0.65 and no bonuses, confidence = 0.65 < 0.70
-        if signal.confidence < MIN_CONFIDENCE:
-            assert signal.has_signal is False
-
-
-# ---------------------------------------------------------------------------
-# Constants check
-# ---------------------------------------------------------------------------
-
-class TestStrategyConstants:
-    def test_trend_dead_zone_is_positive(self) -> None:
-        assert TREND_DEAD_ZONE > 0
-
-    def test_atr_spike_multiplier_gt_one(self) -> None:
-        assert ATR_SPIKE_MULTIPLIER > 1.0
+    def test_atr_spike_reduces_confidence(self) -> None:
+        """ATR spike should reduce confidence via penalty."""
+        df = _make_indicators_df(30)
+        df["atr_pct"] = np.full(30, 0.01)
+        df.loc[df.index[-1], "atr_pct"] = 0.05  # Spike
+        signal_normal = generate_signal(_make_indicators_df(30))
+        signal_spike = generate_signal(df)
+        # Spike signal should have lower or equal confidence
+        assert signal_spike.confidence <= signal_normal.confidence

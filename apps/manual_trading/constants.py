@@ -64,23 +64,19 @@ def min_candles_for_timeframe(timeframe_sec: int) -> int:
     return MIN_CANDLES_BY_TIMEFRAME.get(timeframe_sec, 10)
 
 
-# --- Trend-Following Confluence Strategy Constants ---
+# --- Always-Signal Directional Confidence Strategy Constants ---
 
-# Trend detection: EMA cross must exceed this dead zone to count as a trend.
-# Value is relative to ema_cross magnitude (which is (ema_fast - ema_slow) / close).
-# Instrument from real data before deploying live.
-TREND_DEAD_ZONE: float = 0.001
+# Trend strength thresholds (normalized EMA cross magnitude = |ema_fast - ema_slow| / close).
+# Strong trend gets high confidence bonus, mild trend gets moderate bonus.
+TREND_STRONG_THRESHOLD: float = 0.002
+TREND_MILD_THRESHOLD: float = 0.0005
 
-# Confidence gate: signals below this are rejected as no-signal.
-MIN_CONFIDENCE: float = 0.70
+# RSI boundaries for favorability scoring.
+# Below 35 in downtrend = favorable (oversold bounce). Above 65 in uptrend = favorable.
+RSI_FAVORABLE_LOW: float = 35.0
+RSI_FAVORABLE_HIGH: float = 65.0
 
-# RSI entry timing zones (uptrend = buy the dip, downtrend = sell the rip).
-RSI_ENTRY_LOW: float = 40.0
-RSI_ENTRY_HIGH: float = 50.0
-RSI_ENTRY_LOW_DOWN: float = 50.0
-RSI_ENTRY_HIGH_DOWN: float = 60.0
-
-# ATR volatility filter: reject signals when ATR% > multiplier * SMA(ATR%, window).
+# ATR volatility penalty: reduce confidence when ATR% > multiplier * SMA(ATR%, window).
 ATR_SPIKE_MULTIPLIER: float = 2.0
 ATR_SMA_WINDOW: int = 10  # longest feasible with 16-30 candles
 
