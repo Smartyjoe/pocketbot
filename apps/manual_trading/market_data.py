@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import time as _time
-from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 import pandas as pd

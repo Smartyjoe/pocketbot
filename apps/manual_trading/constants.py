@@ -62,3 +62,27 @@ MIN_CANDLES_BY_TIMEFRAME: dict[int, int] = {
 def min_candles_for_timeframe(timeframe_sec: int) -> int:
     """Return the minimum candles needed for a given timeframe."""
     return MIN_CANDLES_BY_TIMEFRAME.get(timeframe_sec, 10)
+
+
+# --- Trend-Following Confluence Strategy Constants ---
+
+# Trend detection: EMA cross must exceed this dead zone to count as a trend.
+# Value is relative to ema_cross magnitude (which is (ema_fast - ema_slow) / close).
+# Instrument from real data before deploying live.
+TREND_DEAD_ZONE: float = 0.001
+
+# Confidence gate: signals below this are rejected as no-signal.
+MIN_CONFIDENCE: float = 0.70
+
+# RSI entry timing zones (uptrend = buy the dip, downtrend = sell the rip).
+RSI_ENTRY_LOW: float = 40.0
+RSI_ENTRY_HIGH: float = 50.0
+RSI_ENTRY_LOW_DOWN: float = 50.0
+RSI_ENTRY_HIGH_DOWN: float = 60.0
+
+# ATR volatility filter: reject signals when ATR% > multiplier * SMA(ATR%, window).
+ATR_SPIKE_MULTIPLIER: float = 2.0
+ATR_SMA_WINDOW: int = 10  # longest feasible with 16-30 candles
+
+# Cooldown: minimum bars between signals for the same pair (handler-layer).
+COOLDOWN_BARS: int = 3

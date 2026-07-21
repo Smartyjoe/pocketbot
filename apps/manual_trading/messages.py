@@ -20,14 +20,48 @@ def format_signal(symbol: str, signal: Signal, entry_price: float) -> str:
         f"Direction: {direction_label}",
         f"Confidence: {signal.confidence:.0%}",
         f"Entry Price: {entry_price:.5f}",
-        "",
-        "Analysis:",
     ]
+
+    # Extract trend info from reasoning bullets for the header
+    trend_line = next(
+        (b for b in signal.reasoning if "trend" in b.lower() or "EMA" in b),
+        None,
+    )
+    if trend_line:
+        lines.append(f"Trend: {trend_line}")
+
+    # Extract entry zone from reasoning bullets for the header
+    entry_line = next(
+        (
+            b
+            for b in signal.reasoning
+            if "RSI" in b and any(
+                kw in b.lower() for kw in ("dip", "sell zone", "entry zone")
+            )
+        ),
+        None,
+    )
+    if entry_line:
+        lines.append(f"Entry Zone: {entry_line}")
+
+    lines.append("")
+    lines.append("Analysis:")
 
     for bullet in signal.reasoning:
         lines.append(f"  - {bullet}")
 
     return "\n".join(lines)
+
+
+def format_no_signal(symbol: str, reason: str) -> str:
+    """Format message when no trade signal is available."""
+    symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
+    return (
+        f"No clear signal for {symbol_display}\n\n"
+        f"Market conditions aren't favorable for a trade right now.\n\n"
+        f"Reason: {reason}\n\n"
+        f"Try again in a few minutes."
+    )
 
 
 def format_prediction_confirmed(prediction: Prediction) -> str:

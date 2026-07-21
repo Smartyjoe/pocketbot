@@ -1,9 +1,8 @@
 import pytest
 import numpy as np
 import pandas as pd
-import tempfile
 from pathlib import Path
-from infrastructure.ml.model import TradingModel, ModelMetadata
+from infrastructure.ml.model import TradingModel
 
 
 def _make_data(n: int = 200, seed: int = 42) -> tuple[pd.DataFrame, pd.Series]:

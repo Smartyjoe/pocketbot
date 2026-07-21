@@ -1,6 +1,5 @@
 import pytest
 from decimal import Decimal
-from uuid import UUID
 
 from domain.value_objects.symbol import Symbol
 from domain.value_objects.money import Money, CurrencyMismatchError

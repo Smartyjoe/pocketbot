@@ -15,6 +15,7 @@ from apps.manual_trading.messages import (
     format_ai_signal,
     format_no_model_available,
     format_ai_model_info,
+    format_no_signal,
 )
 from apps.manual_trading.models import Prediction, Signal
 
@@ -22,6 +23,7 @@ from apps.manual_trading.models import Prediction, Signal
 class TestFormatSignal:
     def test_call_signal(self) -> None:
         signal = Signal(
+            has_signal=True,
             direction="call",
             confidence=0.78,
             reasoning=["RSI 28 -- oversold", "MACD bullish crossover"],
@@ -35,6 +37,7 @@ class TestFormatSignal:
 
     def test_put_signal(self) -> None:
         signal = Signal(
+            has_signal=True,
             direction="put",
             confidence=0.82,
             reasoning=["RSI 75 -- overbought"],
@@ -46,6 +49,7 @@ class TestFormatSignal:
 
     def test_otc_display_name(self) -> None:
         signal = Signal(
+            has_signal=True,
             direction="call",
             confidence=0.7,
             reasoning=["test"],
@@ -56,6 +60,7 @@ class TestFormatSignal:
 
     def test_non_otc_display_name(self) -> None:
         signal = Signal(
+            has_signal=True,
             direction="call",
             confidence=0.7,
             reasoning=["test"],
@@ -64,6 +69,52 @@ class TestFormatSignal:
         msg = format_signal("EURUSD", signal, 1.0852)
         assert "(OTC)" not in msg
         assert "EURUSD" in msg
+
+    def test_trend_line_extracted_to_header(self) -> None:
+        signal = Signal(
+            has_signal=True,
+            direction="call",
+            confidence=0.80,
+            reasoning=[
+                "Uptrend (EMA 10 > EMA 30, MACD confirmed)",
+                "RSI dip buy — RSI 45 in entry zone (40-50)",
+            ],
+            indicators={"rsi": 45.0},
+        )
+        msg = format_signal("EURUSD_otc", signal, 1.0852)
+        assert "Trend:" in msg
+        assert "Uptrend" in msg
+
+    def test_entry_zone_extracted_to_header(self) -> None:
+        signal = Signal(
+            has_signal=True,
+            direction="call",
+            confidence=0.80,
+            reasoning=[
+                "Uptrend (EMA 10 > EMA 30)",
+                "RSI dip buy — RSI 45 in entry zone (40-50) within uptrend",
+            ],
+            indicators={"rsi": 45.0},
+        )
+        msg = format_signal("EURUSD_otc", signal, 1.0852)
+        assert "Entry Zone:" in msg
+
+
+class TestFormatNoSignal:
+    def test_displays_reason(self) -> None:
+        msg = format_no_signal("EURUSD_otc", "No clear trend")
+        assert "No clear signal" in msg
+        assert "No clear trend" in msg
+        assert "EURUSD (OTC)" in msg
+
+    def test_non_otc_pair(self) -> None:
+        msg = format_no_signal("EURUSD", "EMA in dead zone")
+        assert "EURUSD" in msg
+        assert "(OTC)" not in msg
+
+    def test_suggests_retry(self) -> None:
+        msg = format_no_signal("GBPUSD_otc", "Momentum disagrees")
+        assert "Try again" in msg
 
 
 class TestFormatPredictionConfirmed:

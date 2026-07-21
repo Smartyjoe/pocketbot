@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from decimal import Decimal
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -8,7 +8,7 @@ from interfaces.telegram.notifications import TelegramNotifier
 from domain.events.trade_opened import TradeOpened
 from domain.events.trade_expired import TradeExpired
 from domain.events.balance_changed import BalanceChanged
-from domain.events.broker_status import BrokerConnected, BrokerDisconnected, BrokerError
+from domain.events.broker_status import BrokerConnected, BrokerDisconnected
 from domain.value_objects.symbol import Symbol
 from domain.value_objects.direction import Direction
 from domain.value_objects.money import Money

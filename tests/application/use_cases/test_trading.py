@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -10,7 +10,6 @@ from domain.entities.trade import Trade, TradeStatus, TradeResult
 from domain.value_objects.symbol import Symbol
 from domain.value_objects.direction import Direction
 from domain.value_objects.money import Money
-from domain.value_objects.confidence import Confidence
 from domain.services.risk_calculator import RiskCalculator
 from domain.services.signal_evaluator import SignalEvaluator
 from domain.events.trade_expired import TradeExpired

@@ -36,9 +36,11 @@ from apps.manual_trading.messages import (
     format_recent,
     format_ai_signal,
     format_no_model_available,
+    format_no_signal,
 )
 from apps.manual_trading.models import Prediction
 from apps.manual_trading.signal_generator import generate_signal
+from apps.manual_trading.constants import COOLDOWN_BARS
 from infrastructure.features.indicators.technical import TechnicalIndicators
 
 logger = logging.getLogger(__name__)
@@ -445,8 +447,34 @@ async def _handle_quick_duration(
         ti = TechnicalIndicators()
         df_with_indicators = ti.compute(df)
 
+        # Cooldown check — block signals for the same pair within COOLDOWN_BARS
+        cooldown_state: dict[str, int] = context.user_data.setdefault(
+            "signal_cooldown", {}
+        )
+        current_bar = len(df_with_indicators) - 1
+        last_bar = cooldown_state.get(symbol)
+        if last_bar is not None and (current_bar - last_bar) < COOLDOWN_BARS:
+            remaining = COOLDOWN_BARS - (current_bar - last_bar)
+            symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
+            await query.edit_message_text(
+                format_no_signal(
+                    symbol_display,
+                    f"Cooldown — wait {remaining} more bar{'s' if remaining != 1 else ''} "
+                    f"before next signal for this pair",
+                )
+            )
+            return
+
         # Generate signal
         signal = generate_signal(df_with_indicators)
+
+        # Gate: only proceed if signal is valid
+        if not signal.has_signal:
+            symbol_display = symbol.replace("_otc", " (OTC)").replace("_", "/")
+            await query.edit_message_text(
+                format_no_signal(symbol_display, signal.reasoning[0])
+            )
+            return
 
         # Get current price
         price = await collector.get_latest_price(symbol)
@@ -496,6 +524,9 @@ async def _handle_quick_duration(
 
         store: PredictionStore = context.bot_data["prediction_store"]
         await store.insert(prediction)
+
+        # Update cooldown state — prevent rapid re-signals for same pair
+        cooldown_state[symbol] = current_bar
 
         # Send confirmation
         confirmation = format_prediction_confirmed(prediction)

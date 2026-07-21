@@ -1,5 +1,4 @@
 """Tests for market data collector."""
-import asyncio
 import json
 
 import pytest

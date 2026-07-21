@@ -39,6 +39,7 @@ class Prediction(BaseModel):
 class Signal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    has_signal: bool
     direction: str
     confidence: float
     reasoning: list[str]
