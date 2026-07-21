@@ -283,6 +283,9 @@ async def _handle_ai_duration(
 
         # Load ML model and predict
         ml_model = context.bot_data["ml_model"]
+        if not ml_model.is_trained:
+            await query.edit_message_text(format_no_model_available())
+            return
         win_probability = float(ml_model.predict_proba(feature_row)[0])
 
         # Determine direction
