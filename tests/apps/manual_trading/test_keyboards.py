@@ -5,7 +5,9 @@ from apps.manual_trading.keyboards import (
     duration_selection_keyboard,
     trade_mode_keyboard,
     result_feedback_keyboard,
+    filter_assets_by_payout,
 )
+from apps.manual_trading.constants import POPULAR_PAIRS
 
 
 class TestKeyboards:
@@ -82,3 +84,92 @@ class TestResultFeedbackKeyboard:
         assert any("Win" in t for t in texts)
         assert any("Tie" in t for t in texts)
         assert any("Loss" in t for t in texts)
+
+
+class TestPairSelectionKeyboardParameterized:
+    def test_default_uses_popular_pairs(self) -> None:
+        kb = pair_selection_keyboard()
+        kb_default = pair_selection_keyboard(pairs=None)
+        assert kb.inline_keyboard == kb_default.inline_keyboard
+
+    def test_custom_pair_list(self) -> None:
+        kb = pair_selection_keyboard(pairs=["EURUSD_otc", "GBPUSD_otc"])
+        assert sum(len(row) for row in kb.inline_keyboard) == 2
+        first_cb = kb.inline_keyboard[0][0].callback_data
+        assert first_cb == "pair:EURUSD_otc"
+
+    def test_empty_pair_list_returns_empty_keyboard(self) -> None:
+        kb = pair_selection_keyboard(pairs=[])
+        assert len(kb.inline_keyboard) == 0
+
+    def test_single_pair(self) -> None:
+        kb = pair_selection_keyboard(pairs=["BTCUSD_otc"])
+        assert sum(len(row) for row in kb.inline_keyboard) == 1
+
+
+class TestFilterAssetsByPayout:
+    def test_filters_below_min(self) -> None:
+        result = filter_assets_by_payout(
+            ["EURUSD_otc", "GBPUSD_otc"],
+            {"EURUSD_otc": 85.0, "GBPUSD_otc": 75.0},
+            min_payout=80.0, max_payout=92.0,
+        )
+        assert result == ["EURUSD_otc"]
+
+    def test_filters_above_max(self) -> None:
+        result = filter_assets_by_payout(
+            ["EURUSD_otc", "GBPUSD_otc"],
+            {"EURUSD_otc": 85.0, "GBPUSD_otc": 95.0},
+            min_payout=80.0, max_payout=92.0,
+        )
+        assert result == ["EURUSD_otc"]
+
+    def test_includes_unknown_assets(self) -> None:
+        result = filter_assets_by_payout(
+            ["EURUSD_otc", "UNKNOWN"],
+            {"EURUSD_otc": 85.0},
+        )
+        assert "UNKNOWN" in result
+
+    def test_all_in_range(self) -> None:
+        payouts = {p: 85.0 for p in POPULAR_PAIRS}
+        result = filter_assets_by_payout(POPULAR_PAIRS, payouts)
+        assert result == POPULAR_PAIRS
+
+    def test_empty_payouts_returns_all(self) -> None:
+        result = filter_assets_by_payout(POPULAR_PAIRS, {})
+        assert result == POPULAR_PAIRS
+
+    def test_normalizes_decimal_payout(self) -> None:
+        result = filter_assets_by_payout(
+            ["EURUSD_otc", "GBPUSD_otc"],
+            {"EURUSD_otc": 0.85, "GBPUSD_otc": 0.75},
+            min_payout=80.0, max_payout=92.0,
+        )
+        assert result == ["EURUSD_otc"]
+
+    def test_boundary_inclusive_min(self) -> None:
+        result = filter_assets_by_payout(
+            ["AT_MIN", "BELOW_MIN"],
+            {"AT_MIN": 80.0, "BELOW_MIN": 79.99},
+            min_payout=80.0, max_payout=92.0,
+        )
+        assert "AT_MIN" in result
+        assert "BELOW_MIN" not in result
+
+    def test_boundary_inclusive_max(self) -> None:
+        result = filter_assets_by_payout(
+            ["AT_MAX", "ABOVE_MAX"],
+            {"AT_MAX": 92.0, "ABOVE_MAX": 92.01},
+            min_payout=80.0, max_payout=92.0,
+        )
+        assert "AT_MAX" in result
+        assert "ABOVE_MAX" not in result
+
+    def test_all_filtered_out_returns_empty(self) -> None:
+        result = filter_assets_by_payout(
+            ["EURUSD_otc", "GBPUSD_otc"],
+            {"EURUSD_otc": 70.0, "GBPUSD_otc": 75.0},
+            min_payout=80.0, max_payout=92.0,
+        )
+        assert result == []

@@ -19,13 +19,17 @@ _SIGNAL_IMAGES = {
 }
 
 from apps.manual_trading.constants import (
+    POPULAR_PAIRS,
     min_candles_for_timeframe,
+    MIN_ASSET_PAYOUT_PCT,
+    MAX_ASSET_PAYOUT_PCT,
 )
 from apps.manual_trading.database import PredictionStore
 from apps.manual_trading.keyboards import (
     pair_selection_keyboard,
     duration_selection_keyboard,
     trade_mode_keyboard,
+    filter_assets_by_payout,
 )
 from apps.manual_trading.market_data import MarketDataCollector
 from apps.manual_trading.messages import (
@@ -49,6 +53,24 @@ logger = logging.getLogger(__name__)
 # Maximum time to wait for candle data (seconds)
 CANDLE_WAIT_TIMEOUT = 15
 CANDLE_POLL_INTERVAL = 0.5
+
+
+async def _get_filtered_pairs(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    """Return POPULAR_PAIRS filtered by payout percentage.
+
+    Falls back to all POPULAR_PAIRS if broker or payout data is unavailable.
+    """
+    broker = context.bot_data.get("broker")
+    if broker is None:
+        return list(POPULAR_PAIRS)
+    try:
+        payouts = broker.get_payouts()
+    except Exception:
+        logger.warning("payout_fetch_failed")
+        return list(POPULAR_PAIRS)
+    if not payouts:
+        return list(POPULAR_PAIRS)
+    return filter_assets_by_payout(POPULAR_PAIRS, payouts)
 
 
 async def _has_pending_result(context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> bool:
@@ -132,11 +154,21 @@ async def callback_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     mode = data.split(":", 1)[1]
+    pairs = await _get_filtered_pairs(context)
+
+    if not pairs:
+        await query.edit_message_text(
+            "\u26a0\ufe0f No assets available with the current payout filter.\n"
+            f"Payout range: {MIN_ASSET_PAYOUT_PCT:.0f}% \u2013 {MAX_ASSET_PAYOUT_PCT:.0f}%.\n\n"
+            "Adjust MIN_ASSET_PAYOUT_PCT / MAX_ASSET_PAYOUT_PCT in constants.py"
+            " to widen the range."
+        )
+        return
 
     if mode == "quick":
         await query.edit_message_text(
             "Quick Trade - Rule-based signals\n\nChoose a trading pair:",
-            reply_markup=pair_selection_keyboard(),
+            reply_markup=pair_selection_keyboard(pairs),
         )
     elif mode == "ai":
         ml_model = context.bot_data.get("ml_model")
@@ -147,7 +179,7 @@ async def callback_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data["ai_mode"] = True
         await query.edit_message_text(
             "AI Analysis - ML-powered signals\n\nChoose a trading pair:",
-            reply_markup=pair_selection_keyboard(),
+            reply_markup=pair_selection_keyboard(pairs),
         )
 
 

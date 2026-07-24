@@ -86,6 +86,7 @@ class PocketOptionBroker:
         self._authenticated = False
         self._balance: Optional[Decimal] = None
         self._last_prices: dict[str, Decimal] = {}
+        self._payouts: dict[str, float] = {}
         self._message_handlers: list[Callable] = []
 
         self._msg_queue: asyncio.Queue[str | bytes] = asyncio.Queue()
@@ -678,6 +679,7 @@ class PocketOptionBroker:
                 symbol = str(asset_row[1]) if len(asset_row) > 1 else ""
                 payout = asset_row[5]
                 if symbol:
+                    self._payouts[symbol] = float(payout)
                     logger.debug(
                         "payout_info", symbol=symbol, payout=payout
                     )
@@ -702,6 +704,14 @@ class PocketOptionBroker:
 
         self._balance = DEMO_BALANCE
         return Money(amount=str(self._balance))
+
+    def get_payout(self, symbol: str) -> float | None:
+        """Return cached payout percentage for a symbol, or None."""
+        return self._payouts.get(symbol)
+
+    def get_payouts(self) -> dict[str, float]:
+        """Return all cached payout data keyed by symbol."""
+        return dict(self._payouts)
 
     async def place_trade(
         self,
