@@ -4,6 +4,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 import pandas as pd
 import numpy as np
+import pandas_ta as ta
 
 
 class IndicatorConfig(BaseModel):
@@ -79,6 +80,14 @@ class TechnicalIndicators:
         out["return_1"] = out["close"].pct_change(periods=1)
         out["return_3"] = out["close"].pct_change(periods=3)
 
+        adx_df = ta.adx(out["high"], out["low"], out["close"], length=c.atr_period)
+        out["adx"] = adx_df.iloc[:, 0]
+
+        zscore_window = 20
+        out["zscore"] = (
+            out["close"] - out["close"].rolling(window=zscore_window).mean()
+        ) / out["close"].rolling(window=zscore_window).std().replace(0, np.nan)
+
         return out
 
     def feature_columns(self) -> list[str]:
@@ -106,6 +115,8 @@ class TechnicalIndicators:
             "lower_shadow",
             "return_1",
             "return_3",
+            "adx",
+            "zscore",
         ]
 
     @staticmethod

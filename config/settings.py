@@ -79,6 +79,14 @@ class SignalConfig(BaseSettings):
     max_features: int = 50
 
 
+class OpenRouterConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="OPENROUTER_", env_file=".env", extra="ignore")
+
+    api_key: str = ""
+    request_timeout: float = 15.0
+    max_retries: int = 3
+
+
 class MLflowConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MLFLOW_", env_file=".env", extra="ignore")
 
@@ -117,6 +125,7 @@ class AppConfig(BaseSettings):
     trading: TradingConfig = TradingConfig()
     signal: SignalConfig = SignalConfig()
     mlflow: MLflowConfig = MLflowConfig()
+    openrouter: OpenRouterConfig = OpenRouterConfig()
     logging: LoggingConfig = LoggingConfig()
 
 

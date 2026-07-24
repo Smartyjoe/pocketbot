@@ -26,7 +26,8 @@ from config.settings import load_settings
 from infrastructure.persistence.database import init_db
 from infrastructure.broker.pocket_option import PocketOptionBroker
 from apps.manual_trading.bot import ManualTradingBot
-from apps.manual_trading.database import PredictionStore, TrainingDataStore
+from apps.manual_trading.database import PredictionStore, TrainingDataStore, AISignalStore
+from apps.manual_trading.strategies.ai_analysis.engine import AIAnalysisEngine
 from apps.manual_trading.market_data import MarketDataCollector
 from apps.manual_trading.trade_tracker import TradeTracker
 from infrastructure.ml.model import TradingModel
@@ -117,9 +118,36 @@ async def main() -> None:
     except Exception:
         logger.warning("migration_training_data_failed", exc_info=True)
 
+    # Ensure ai_signals table exists (idempotent migration)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    has_signal BOOLEAN NOT NULL,
+                    direction TEXT NOT NULL,
+                    confidence DOUBLE PRECISION NOT NULL,
+                    reasoning TEXT,
+                    shadow_mode BOOLEAN NOT NULL DEFAULT false,
+                    model_response_raw TEXT,
+                    prediction_id UUID,
+                    outcome TEXT,
+                    scored_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            ))
+            await conn.commit()
+        logger.info("migration_ai_signals_applied")
+    except Exception:
+        logger.warning("migration_ai_signals_failed", exc_info=True)
+
     # Initialize components
     prediction_store = PredictionStore(session_factory)
     training_data_store = TrainingDataStore(session_factory)
+    ai_signal_store = AISignalStore(session_factory)
     market_data = MarketDataCollector()
     broker = PocketOptionBroker(config=settings.broker)
 
@@ -160,6 +188,7 @@ async def main() -> None:
         logger.info("will_retry_in_background")
 
     # Build Telegram bot
+    ai_engine = AIAnalysisEngine(signal_store=ai_signal_store)
     bot = ManualTradingBot(
         bot_token=settings.telegram.bot_token.get_secret_value(),
     )
@@ -167,6 +196,8 @@ async def main() -> None:
         broker=broker,
         prediction_store=prediction_store,
         training_data_store=training_data_store,
+        ai_signal_store=ai_signal_store,
+        ai_engine=ai_engine,
         market_data=market_data,
         ml_model=ml_model,
     )
@@ -202,6 +233,7 @@ async def main() -> None:
 
     # Graceful shutdown
     logger.info("shutting_down")
+    await ai_engine.close()
     trade_tracker.stop()
     reconnect_task.cancel()
     await asyncio.gather(reconnect_task, return_exceptions=True)

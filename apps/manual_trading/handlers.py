@@ -24,7 +24,7 @@ from apps.manual_trading.constants import (
     MIN_ASSET_PAYOUT_PCT,
     MAX_ASSET_PAYOUT_PCT,
 )
-from apps.manual_trading.database import PredictionStore
+from apps.manual_trading.database import PredictionStore, AISignalStore
 from apps.manual_trading.keyboards import (
     pair_selection_keyboard,
     duration_selection_keyboard,
@@ -45,6 +45,7 @@ from apps.manual_trading.messages import (
 from apps.manual_trading.models import Prediction
 from apps.manual_trading.signal_generator import generate_signal
 from apps.manual_trading.strategies.mean_reversion import MeanReversionEngine
+from apps.manual_trading.strategies.ai_analysis.engine import AIAnalysisEngine, AIAnalysisResult
 from apps.manual_trading.constants import COOLDOWN_BARS
 from infrastructure.features.indicators.technical import TechnicalIndicators
 
@@ -271,7 +272,7 @@ async def _handle_ai_duration(
     timeframe_sec: int,
     telegram_id: int,
 ) -> None:
-    """Handle AI Analysis duration selection — ML-powered signal."""
+    """Handle AI Analysis duration selection — LLM-powered signal with ML fallback."""
     await query.edit_message_text("\U0001f916 Running AI analysis...")
 
     try:
@@ -286,7 +287,6 @@ async def _handle_ai_duration(
 
         await collector.request_candles(broker, symbol, timeframe_sec)
 
-        # Wait for candle data — AI needs more candles for stable features
         df = await _wait_for_candles(collector, symbol, timeframe_sec, CANDLE_WAIT_TIMEOUT)
 
         min_candles = min_candles_for_timeframe(timeframe_sec)
@@ -297,82 +297,104 @@ async def _handle_ai_duration(
             )
             return
 
-        # Compute indicators
         ti = TechnicalIndicators()
         df_with_indicators = ti.compute(df)
 
-        # Build features with FeatureEngine (pass raw df — build_features computes its own indicators)
-        from infrastructure.features.engine import FeatureEngine
-        feature_engine = FeatureEngine()
-        feature_result = feature_engine.build_features(df)
+        result_direction: str = ""
+        result_confidence: float = 0.0
+        result_entry_price: float = 0.0
+        result_reasoning: str = ""
+        result_top_features: list[tuple[str, float]] = []
+        result_indicators: dict[str, float] = {}
+        result_model_version: str = ""
+        ai_used: bool = False
 
-        last_idx = len(feature_result.features) - 1
-        if not feature_result.valid_mask.iloc[last_idx]:
-            await query.edit_message_text(
-                "Could not compute valid features for this data.\n"
-                "Try a different pair or timeframe."
-            )
-            return
+        # --- Step 1: Try AI Analysis Engine ---
+        ai_engine: AIAnalysisEngine | None = context.bot_data.get("ai_engine")
+        ai_signal_result: AIAnalysisResult | None = None
 
-        feature_row = feature_result.features.iloc[last_idx:last_idx + 1]
+        if ai_engine is not None:
+            engine_result = await ai_engine.analyze(df_with_indicators, symbol)
+            ai_signal_result = engine_result
 
-        # Load ML model and predict
-        ml_model = context.bot_data["ml_model"]
-        if not ml_model.is_trained:
-            await query.edit_message_text(format_no_model_available())
-            return
-        win_probability = float(ml_model.predict_proba(feature_row)[0])
+            if engine_result.has_signal and not engine_result.shadow_mode:
+                price = await collector.get_latest_price(symbol)
+                result_entry_price = float(price) if price else float(df.iloc[-1]["close"])
+                result_direction = engine_result.direction
+                result_confidence = engine_result.confidence
+                result_reasoning = engine_result.reasoning
+                result_model_version = "OpenRouter (free-tier LLM)"
+                ai_used = True
 
-        # Determine direction
-        if win_probability >= 0.55:
-            direction = "call"
-            confidence = win_probability
-        elif win_probability <= 0.45:
-            direction = "put"
-            confidence = 1 - win_probability
-        else:
-            await query.edit_message_text(
-                f"\U0001f916 AI Analysis - No Clear Signal\n\n"
-                f"Win probability: {win_probability:.1%}\n"
-                f"Confidence below threshold (55%).\n"
-                f"Market conditions unclear — try a different pair or time."
-            )
-            return
+        # --- Step 2: ML Fallback ---
+        if not ai_used:
+            from infrastructure.features.engine import FeatureEngine
+            feature_engine = FeatureEngine()
+            feature_result = feature_engine.build_features(df)
 
-        # Get current price
-        price = await collector.get_latest_price(symbol)
-        entry_price_float = float(price) if price else float(df.iloc[-1]["close"])
+            last_idx = len(feature_result.features) - 1
+            if not feature_result.valid_mask.iloc[last_idx]:
+                await query.edit_message_text(
+                    "Could not compute valid features for this data.\n"
+                    "Try a different pair or timeframe."
+                )
+                return
 
-        # Build reasoning from feature importance
-        importance = ml_model.feature_importance()
-        top_features = sorted(importance.items(), key=lambda x: -x[1])[:5]
+            feature_row = feature_result.features.iloc[last_idx:last_idx + 1]
+            ml_model = context.bot_data["ml_model"]
 
-        # Build indicator snapshot
+            if not ml_model.is_trained:
+                await query.edit_message_text(format_no_model_available())
+                return
+
+            win_probability = float(ml_model.predict_proba(feature_row)[0])
+
+            if win_probability >= 0.55:
+                result_direction = "call"
+                result_confidence = win_probability
+            elif win_probability <= 0.45:
+                result_direction = "put"
+                result_confidence = 1 - win_probability
+            else:
+                await query.edit_message_text(
+                    f"\U0001f916 AI Analysis - No Clear Signal\n\n"
+                    f"Win probability: {win_probability:.1%}\n"
+                    f"Confidence below threshold (55%).\n"
+                    f"Market conditions unclear — try a different pair or time."
+                )
+                return
+
+            price = await collector.get_latest_price(symbol)
+            result_entry_price = float(price) if price else float(df.iloc[-1]["close"])
+            result_reasoning = ""
+            importance = ml_model.feature_importance()
+            result_top_features = sorted(importance.items(), key=lambda x: -x[1])[:5]
+            result_model_version = "1.0.0"
+            if ml_model.metadata and ml_model.metadata.version:
+                result_model_version = ml_model.metadata.version
+
+        # --- Build common snapshot (works for both AI and ML paths) ---
         last_row = df_with_indicators.iloc[-1]
-        indicator_snapshot = {}
-        for col in ["rsi", "macd_hist", "bb_pct", "stoch_k", "roc_5"]:
+        result_indicators = {}
+        for col in ["rsi", "adx", "macd_hist", "bb_pct", "stoch_k", "roc_5"]:
             if col in last_row.index:
                 val = last_row[col]
                 if pd.notna(val):
-                    indicator_snapshot[col] = float(val)
+                    result_indicators[col] = float(val)
 
-        # Get model version
-        model_version = "1.0.0"
-        if ml_model.metadata and ml_model.metadata.version:
-            model_version = ml_model.metadata.version
-
-        # Format and send AI signal
+        # --- Send signal message ---
         signal_msg = format_ai_signal(
             symbol=symbol,
-            direction=direction,
-            win_probability=win_probability,
-            entry_price=entry_price_float,
-            model_version=model_version,
-            top_features=top_features,
-            indicator_snapshot=indicator_snapshot,
+            direction=result_direction,
+            win_probability=result_confidence,
+            entry_price=result_entry_price,
+            model_version=result_model_version,
+            top_features=result_top_features if result_top_features else None,
+            indicator_snapshot=result_indicators,
+            reasoning=result_reasoning if ai_used else None,
         )
 
-        image_path = _SIGNAL_IMAGES.get(direction)
+        image_path = _SIGNAL_IMAGES.get(result_direction)
         photo_sent = False
         if image_path and image_path.exists():
             try:
@@ -389,7 +411,7 @@ async def _handle_ai_duration(
         if not photo_sent:
             await query.edit_message_text(signal_msg)
 
-        # Save prediction to database
+        # --- Save prediction ---
         now = datetime.now(timezone.utc)
         expiry = now + timedelta(seconds=timeframe_sec)
         from uuid import uuid4
@@ -399,12 +421,15 @@ async def _handle_ai_duration(
             telegram_id=telegram_id,
             symbol=symbol,
             timeframe_sec=timeframe_sec,
-            direction=direction,
-            confidence=confidence,
-            reasoning=f"AI Model v{model_version}\nWin prob: {win_probability:.1%}\n"
-                      + "\n".join(f"{f}: {imp:.1%}" for f, imp in top_features),
-            indicators=indicator_snapshot,
-            entry_price=Decimal(str(entry_price_float)),
+            direction=result_direction,
+            confidence=result_confidence,
+            reasoning=result_reasoning if ai_used else (
+                f"ML Model v{result_model_version}\n"
+                f"Win prob: {result_confidence:.1%}\n"
+                + "\n".join(f"{f}: {imp:.1%}" for f, imp in result_top_features)
+            ),
+            indicators=result_indicators,
+            entry_price=Decimal(str(result_entry_price)),
             entry_time=now,
             expiry_time=expiry,
             result=None,
@@ -413,12 +438,27 @@ async def _handle_ai_duration(
         store: PredictionStore = context.bot_data["prediction_store"]
         await store.insert(prediction)
 
-        # Store training data for future model improvement
-        await _store_training_data(
-            context, symbol, timeframe_sec, direction, entry_price_float,
-            feature_result.features.iloc[last_idx].to_dict(),
-            win_probability,
-        )
+        # Link AI signal log to prediction
+        if ai_signal_result is not None:
+            ai_store: AISignalStore = context.bot_data["ai_signal_store"]
+            await ai_store.insert(
+                symbol=symbol,
+                has_signal=ai_signal_result.has_signal,
+                direction=ai_signal_result.direction,
+                confidence=ai_signal_result.confidence,
+                reasoning=ai_signal_result.reasoning,
+                shadow_mode=ai_signal_result.shadow_mode,
+                model_response_raw=ai_signal_result.model_response_raw,
+                prediction_id=prediction.id,
+            )
+
+        # Store ML training data (only when ML was used)
+        if not ai_used:
+            await _store_training_data(
+                context, symbol, timeframe_sec, result_direction, result_entry_price,
+                feature_result.features.iloc[last_idx].to_dict(),
+                win_probability,
+            )
 
         confirmation = format_prediction_confirmed(prediction)
         await context.bot.send_message(chat_id=telegram_id, text=confirmation)

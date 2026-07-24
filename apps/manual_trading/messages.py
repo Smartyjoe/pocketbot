@@ -196,8 +196,9 @@ def format_ai_signal(
     win_probability: float,
     entry_price: float,
     model_version: str,
-    top_features: list[tuple[str, float]],
-    indicator_snapshot: dict[str, float],
+    top_features: list[tuple[str, float]] | None = None,
+    indicator_snapshot: dict[str, float] | None = None,
+    reasoning: str | None = None,
 ) -> str:
     """Format an AI analysis signal into a Telegram message."""
     if direction == "call":
@@ -215,22 +216,27 @@ def format_ai_signal(
         f"{dir_icon} {direction_emoji} {symbol.replace('_otc', ' (OTC)').replace('_', '/')}",
         "",
         f"Direction: {direction_label}",
-        f"Win Probability: {win_probability:.1%}",
         f"Confidence: {confidence_pct:.0%}",
         f"Entry Price: {entry_price:.5f}",
-        f"Model: v{model_version}",
-        "",
-        "Key Features:",
+        f"Model: {model_version}",
     ]
 
-    for feat_name, importance in top_features[:5]:
-        feat_display = feat_name.replace("_", " ").title()
-        lines.append(f"  - {feat_display}: {importance:.1%} importance")
+    if reasoning:
+        lines.append("")
+        lines.append("Reasoning:")
+        lines.append(f"  {reasoning}")
+
+    if top_features:
+        lines.append("")
+        lines.append("Key Features:")
+        for feat_name, importance in top_features[:5]:
+            feat_display = feat_name.replace("_", " ").title()
+            lines.append(f"  - {feat_display}: {importance:.1%} importance")
 
     if indicator_snapshot:
         lines.append("")
         lines.append("Indicators:")
-        key_indicators = ["rsi", "macd_hist", "bb_pct", "stoch_k", "roc_5"]
+        key_indicators = ["rsi", "adx", "macd_hist", "bb_pct", "stoch_k", "roc_5"]
         for ind in key_indicators:
             val = indicator_snapshot.get(ind)
             if val is not None:

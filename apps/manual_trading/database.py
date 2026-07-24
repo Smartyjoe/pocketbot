@@ -357,3 +357,69 @@ class TrainingDataStore:
                 )
             )
             return result.scalar_one()
+
+
+class AISignalStore:
+    """Logs every AI analysis attempt for performance analysis.
+
+    Every call to the AI analysis engine — whether it produced a signal
+    or not — is logged here so you can compute real win rates including
+    "declined to answer" cases.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def insert(
+        self,
+        symbol: str,
+        has_signal: bool,
+        direction: str,
+        confidence: float,
+        reasoning: str,
+        shadow_mode: bool,
+        model_response_raw: str,
+        prediction_id: UUID | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO ai_signals
+                        (symbol, has_signal, direction, confidence, reasoning,
+                         shadow_mode, model_response_raw, prediction_id)
+                    VALUES
+                        (:symbol, :has_signal, :direction, :confidence, :reasoning,
+                         :shadow_mode, :model_response_raw, :prediction_id)
+                    """
+                ),
+                {
+                    "symbol": symbol,
+                    "has_signal": has_signal,
+                    "direction": direction,
+                    "confidence": confidence,
+                    "reasoning": reasoning,
+                    "shadow_mode": shadow_mode,
+                    "model_response_raw": model_response_raw,
+                    "prediction_id": str(prediction_id) if prediction_id else None,
+                },
+            )
+            await session.commit()
+
+    async def update_outcome(self, prediction_id: UUID, outcome: str) -> None:
+        """Update ai_signals outcome when a prediction is resolved."""
+        async with self._session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE ai_signals
+                    SET outcome = :outcome, scored_at = NOW()
+                    WHERE prediction_id = :prediction_id
+                    """
+                ),
+                {
+                    "prediction_id": str(prediction_id),
+                    "outcome": outcome,
+                },
+            )
+            await session.commit()
