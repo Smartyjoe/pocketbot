@@ -40,6 +40,7 @@ from apps.manual_trading.messages import (
 )
 from apps.manual_trading.models import Prediction
 from apps.manual_trading.signal_generator import generate_signal
+from apps.manual_trading.strategies.mean_reversion import MeanReversionEngine
 from apps.manual_trading.constants import COOLDOWN_BARS
 from infrastructure.features.indicators.technical import TechnicalIndicators
 
@@ -465,8 +466,13 @@ async def _handle_quick_duration(
             )
             return
 
-        # Generate signal
-        signal = generate_signal(df_with_indicators)
+        # Generate signal — mean-reversion engine for 5-min OTC pairs
+        is_otc_5min = symbol.endswith("_otc") and timeframe_sec == 300
+        if is_otc_5min:
+            engine = MeanReversionEngine()
+            signal = engine.generate_signal(df)
+        else:
+            signal = generate_signal(df_with_indicators)
 
         # Gate: only proceed if signal is valid
         if not signal.has_signal:
